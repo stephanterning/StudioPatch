@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 task_root="$(cd "$(dirname "$0")/.." && pwd)"
-task_build="${STUDIOPATCH_BUILD_DIR:-$task_root/../../work/studiopatch-build}"
+task_build="${STUDIOPATCH_BUILD_DIR:-$task_root/build}"
 mkdir -p "$task_build"
 task_iconset="$(mktemp -d "$task_build/app-icon.XXXXXX")/StudioPatch.iconset"
 mkdir -p "$task_iconset"

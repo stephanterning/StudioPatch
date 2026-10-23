@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 task_root="$(cd "$(dirname "$0")/.." && pwd)"
-task_build="${STUDIOPATCH_BUILD_DIR:-$task_root/../../work/build}"
+task_build="${STUDIOPATCH_BUILD_DIR:-$task_root/build}"
 mkdir -p "$task_build"
 xcrun swiftc -parse-as-library -swift-version 5 \
     "$task_root/Sources/ServiceRecovery.swift" "$task_root/Tests/ServiceRecoveryTests.swift" \

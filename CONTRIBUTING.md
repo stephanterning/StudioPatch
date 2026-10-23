@@ -15,7 +15,6 @@ The code base is small: about 4,000 lines of Swift, C++ and Objective-C++ in `So
 You do **not** need a signing certificate or administrator rights to compile the code and run the tests:
 
 ```sh
-export STUDIOPATCH_BUILD_DIR="$PWD/build"
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j
 ctest --test-dir build --output-on-failure
@@ -28,11 +27,10 @@ To build the signed app bundle, driver and broker into `Dist/`, you need an Appl
 
 ```sh
 export STUDIOPATCH_SIGNING_IDENTITY="Apple Development: Your Name (TEAMID1234)"
-export STUDIOPATCH_BUILD_DIR="$PWD/build"
 bash Scripts/build.sh
 ```
 
-Always set `STUDIOPATCH_BUILD_DIR`; without it, `build.sh` and `test-runtime.sh` default to directories outside the repository. `build/`, `Dist/` and `work/` are ignored by Git.
+The scripts use `build/` for intermediate files; set `STUDIOPATCH_BUILD_DIR` to use another directory. `build/`, `Dist/` and `work/` are ignored by Git.
 
 You can open `Dist/StudioPatch.app` without installing the driver. Interfaces are listed and routing can be edited; audio stays off.
 

@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 task_root="$(cd "$(dirname "$0")/.." && pwd)"
-task_build="${STUDIOPATCH_BUILD_DIR:-$task_root/../../work/studiopatch-build}"
+task_build="${STUDIOPATCH_BUILD_DIR:-$task_root/build}"
 task_dist="$task_root/Dist"
 # Use a persistent certificate identity; never silently fall back to ad-hoc signing.
 task_identity="${STUDIOPATCH_SIGNING_IDENTITY:-}"

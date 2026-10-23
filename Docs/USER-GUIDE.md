@@ -59,6 +59,10 @@ Channel counts and routing are stored separately. If you reduce a channel count,
 - To Computer and From Computer channels take their names from what they are connected to. These are the names your DAW shows for the StudioPatch device. An unconnected channel is called `To Computer N` or `From Computer N`. If one virtual channel feeds several outputs, their names are joined.
 - Clear a label field to remove the label.
 
+![Audio MIDI Setup listing the StudioPatch device's inputs with names such as RE-201, Matriarch L and ZED-R16 · Input 14](images/audio-midi-setup.png)
+
+Channels with a label show it (for example `RE-201`); channels without one show the interface and hardware channel name (for example `ZED-R16 · Input 14`).
+
 ## Unplugged interfaces
 
 If a selected interface disappears (unplugged, powered off), it stays in the list and matrix, greyed out, with its last known channels and labels.

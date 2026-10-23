@@ -34,11 +34,10 @@ or store it (name or SHA-1 fingerprint) in `Scripts/signing-identity.txt`. That 
 From the repository root:
 
 ```sh
-export STUDIOPATCH_BUILD_DIR="$PWD/build"
 bash Scripts/build.sh
 ```
 
-The build compiles everything, runs the test suites and signs the results into `Dist/`:
+Intermediate files go to `build/` (set `STUDIOPATCH_BUILD_DIR` to use another directory). The build compiles everything, runs the test suites and signs the results into `Dist/`:
 
 - `Dist/StudioPatch.app` (control panel, with `StudioPatchService` inside)
 - `Dist/StudioPatch.driver`
