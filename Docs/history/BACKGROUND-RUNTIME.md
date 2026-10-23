@@ -1,6 +1,6 @@
 # Background engine and control panel
 
-Current transport (0.2.0): install the signed shared-memory broker with `sudo bash Scripts/install-transport.sh` before the matching HAL driver. The user service remains responsible for audio; the broker only connects mapped memory during configuration. See [direct transport and measured validation](Docs/LATENCY-DIRECT-2026-10-23.md). The historical requirements and test notes below predate this architecture; the hidden bridge is no longer on the live signal path.
+Current transport (0.2.0): install the signed shared-memory broker with `sudo bash Scripts/install-transport.sh` before the matching HAL driver. The user service remains responsible for audio; the broker only connects mapped memory during configuration. See [direct transport and measured validation](LATENCY-DIRECT-2026-10-23.md). The historical requirements and test notes below predate this architecture; the hidden bridge is no longer on the live signal path.
 
 Status: implemented test version. StudioPatchService runs the engine in a separate process, with a process lock preventing duplicate instances. The control panel is the sole writer of the atomic session file; the service reads the desired configuration and writes a separate timestamped status file. The service can be registered with Scripts/install-service.sh to start at login and restart after crashes. No new driver or service has been installed automatically.
 

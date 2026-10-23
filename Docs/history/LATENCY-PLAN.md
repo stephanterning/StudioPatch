@@ -32,7 +32,7 @@ Historical optimization stages below are retained as later work, not prerequisit
 
 1. This plan.
 2. [Baseline review and observations](LATENCY-REVIEW-2026-10-23.md).
-3. [Run record template](LATENCY-RUN-TEMPLATE.md).
+3. [Run record template](../LATENCY-RUN-TEMPLATE.md).
 4. `Sources/Core.hpp`, `Driver.cpp`, `Bridge.mm`, `RuntimePolicy.hpp`, `Preset.swift`, `App.swift`, and `RuntimeConnection.swift`.
 5. `Tests/CoreTests.cpp`, `RouteTests.mm`, `RateTests.cpp`, `RuntimeIntegration.py`, and the chronological `VERIFICATION.md`.
 

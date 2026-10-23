@@ -1,6 +1,6 @@
 # Verification — October 22, 2026
 
-This is a chronological history. Early statements about an uninstalled driver and untested hardware are superseded by later dated additions. For further latency work, read the [current plan](Docs/LATENCY-PLAN.md).
+This is a chronological history. Early statements about an uninstalled driver and untested hardware are superseded by later dated additions. For further latency work, read the [current plan](LATENCY-PLAN.md).
 
 ## Passed locally
 
@@ -184,7 +184,7 @@ Implemented and installed Sync Source device/stream latency plus separately meas
 
 All six CTest suites and the runtime integration suite passed. Independent physical UFX III output 3 → input 3 captures verified 20 windows across 48/96 kHz, 32/64-frame engine buffers and service/format restarts. Largest observed per-direction discrepancy was 1.128 frames. Reported sums were 1324/1580/724 frames for the respective configurations; physical timestamp-referenced delays were consistently 5 frames larger, matching direct UFX hardware residuals. No hardware correction or stability optimization was applied. Original session restored exactly in JSON meaning, service active at 96 kHz / 32-frame I/O / 64-frame margin.
 
-See [the measurement record](Docs/LATENCY-MEASUREMENT-2026-10-23.md) for the methodology, raw artifact locations, installed backup and limits. Individual DAW compensation and long-duration stability remain unverified.
+See [the measurement record](LATENCY-MEASUREMENT-2026-10-23.md) for the methodology, raw artifact locations, installed backup and limits. Individual DAW compensation and long-duration stability remain unverified.
 
 
 ## 2026-10-23 — Direct transport, version 0.2.0
@@ -193,4 +193,4 @@ Installed the hardware-clocked shared-memory transport and authenticated launchd
 
 At engine buffer 32 and client buffer 256, physical UFX cable RTL is **665 → 729 frames at 96 kHz (+0.667 ms)** and **601 → 649 frames at 48 kHz (+1.000 ms)**. Directional reports agree within approximately 1.4 samples in final observations; the hardware's five-frame residual stays separate. Thirty-second waveform checks, a matched four-worker CPU load comparison, 64/512 client buffers, service restart and 96↔48 transitions passed. Optional ZED correction did not slow UFX; 449,280 passive ZED input samples were bit-identical through StudioPatch. Seven CTest suites and the runtime integration tests passed. Earlier gap-producing candidates were rejected.
 
-[Full evidence and limitations](Docs/LATENCY-DIRECT-2026-10-23.md). This is not an all-interface or long-soak stability certification. Final configuration restored to 96 kHz / 32 engine frames with original routing and synchronization choices; later user preset changes preserved.
+[Full evidence and limitations](LATENCY-DIRECT-2026-10-23.md). This is not an all-interface or long-soak stability certification. Final configuration restored to 96 kHz / 32 engine frames with original routing and synchronization choices; later user preset changes preserved.

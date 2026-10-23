@@ -1,6 +1,6 @@
 # Latency experiment run
 
-Copy this template for each run; keep the original blank. Use “not measured” or “unavailable” rather than zero for missing observations.
+Copy this template for each run; keep the original blank. Use “not measured” or “unavailable” rather than zero for missing observations. See [LATENCY.md](LATENCY.md#measuring-latency) for the tools.
 
 ## Identity and configuration
 
@@ -18,9 +18,9 @@ Copy this template for each run; keep the original blank. Use “not measured”
 - DAW/version/project, plug-ins, monitoring and delay compensation settings:
 - Client buffer requested / actual:
 - Engine buffer requested / actual / observed callback frame sizes:
-- Margin per direction / automatic or manual:
-- Channel counts, routes, fan-out, dormant routes and display order:
-- Hardware and bridge drift correction settings:
+- Software margin per direction (shown under Advanced) and any test overrides:
+- Channel counts, routes, fan-out, inactive routes and display order:
+- Sync lock and drift correction setting per secondary interface:
 - TotalMix/ZED hardware routing:
 
 ## Method

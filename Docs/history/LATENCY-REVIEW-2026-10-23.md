@@ -6,7 +6,7 @@ Configuration inspected: 96 kHz, engine I/O 32 frames, manual transport margin 6
 
 Driver.cpp reads each timeline at requested sample time minus config.delay. The configured margin therefore contributes 64/96000 = 0.667 ms per direction, or 1.333 ms round trip. This is not measured physical round-trip latency. The 16384-frame timeline capacity is not a 16384-frame audio delay.
 
-Read-only Core Audio probe (../Tools/latency-probe.cpp):
+Read-only Core Audio probe (../../Tools/latency-probe.cpp):
 
 | Visible device | Buffer frames | Input device latency / safety offset | Output device latency / safety offset |
 |---|---:|---:|---:|
