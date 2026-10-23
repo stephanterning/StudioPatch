@@ -1,147 +1,141 @@
-# Verifiering — 22 oktober 2026
+# Verification — October 22, 2026
 
-Detta är en kronologisk historik. Tidiga uppgifter om ej installerad drivrutin och ej testad hårdvara är senare ersatta av daterade tillägg. För fortsatt latensarbete, läs [aktuell plan](Docs/LATENCY-PLAN.md).
+This is a chronological history. Early statements about an uninstalled driver and untested hardware are superseded by later dated additions. For further latency work, read the [current plan](Docs/LATENCY-PLAN.md).
 
-## Godkänt lokalt
+## Passed locally
 
-- C++/Objective-C++-bygge: AudioServerPlugIn, Core Audio-brygga, enhetsinventering och tester.
-- SwiftUI-app kompilerad för Apple Silicon.
-- `core-tests` och `route-tests`: godkända i Release.
-- Samma två testprogram: godkända med AddressSanitizer och UndefinedBehaviorSanitizer.
-- Bundle-plistor och shellskript: syntaxkontrollerade.
-- Lokal ad hoc-signatur: verifierad för app och drivrutinsbundle.
-- Appen har öppnats via macOS. Matris och kanallista har inspekterats; separata in-/utfält har testats med 37/21.
-- Den skrivskyddade inventeringen har läst riktiga Core Audio-enheter och kanalnamn. Appen visar bland annat UFX Analog, ADAT och MADI samt ZED:s Input-kanaler.
-- Senaste UI-avläsning: UFX III 94 in/94 ut, 96 kHz; ZED-R16 18 in/18 ut, 96 kHz.
-- Användarens angivna driftfall: UFX III är master, normalt 96 kHz, ZED synkroniserad via ADAT. Slutbyggets standardfrekvens har anpassats till detta.
+- C++/Objective-C++ build: AudioServerPlugIn, Core Audio bridge, device inventory and tests.
+- SwiftUI app compiled for Apple Silicon.
+- `core-tests` and `route-tests` passed in Release.
+- Both test programs passed with AddressSanitizer and UndefinedBehaviorSanitizer.
+- Bundle plists and shell scripts passed syntax checks.
+- Local ad hoc signatures verified for the app and driver bundle.
+- App opened through macOS. Matrix and channel list inspected; separate input/output fields tested with 37/21.
+- Read-only inventory read actual Core Audio devices and channel names, including UFX Analog, ADAT and MADI and ZED Input channels.
+- Latest UI reading: UFX III 94 inputs/94 outputs, 96 kHz; ZED-R16 18 inputs/18 outputs, 96 kHz.
+- User's intended setup: UFX III as master, normally 96 kHz, ZED synchronized through ADAT. The final build's default rate was adjusted accordingly.
 
-## Inte verifierat
+## Not verified
 
-- Drivrutinen har **inte installerats eller laddats av coreaudiod**. In-process-test är inte bevis för fungerande HAL-publicering.
-- Inget ljud har routats till/från användarens kort, och inga inspelningar har gjorts.
-- Privat aggregate med den dolda bryggan, mikrofonbehörighet och Abletons beteende behöver testas i verklig drift.
-- Ingen faktisk round-trip-latens, bittransparens eller DAW-inspelningsoffset har mätts.
-- Inget långtidstest, vilolägestest eller fysiskt frånkopplingstest är utfört.
+- Driver **not installed or loaded by coreaudiod**. In-process tests do not prove working HAL publication.
+- No audio routed to/from the user's interfaces and no recordings made.
+- Private aggregate with hidden bridge, microphone permission and Ableton behavior require live testing.
+- No physical round-trip latency, bit transparency or DAW recording offset measured.
+- No extended run, sleep or physical disconnection tests performed.
 
-Inga ändringar har gjorts av RME-/ZED-inställningar, TotalMix, den befintliga Aggregate Device eller macOS standardljudenheter. Inga tjänster, drivrutiner eller automationsjobb har installerats.
+No RME/ZED settings, TotalMix, existing Aggregate Device or macOS default audio devices changed. No services, drivers or automated jobs installed.
 
-## Tillägg: Följ klockmaster
+## Addition: Follow clock master
 
-Frekvenssynkning före start och separat synkknapp implementerade. Masterfrekvensen läses; endast avvikande valda fysiska slavkort skrivs. Hela gruppen förkontrolleras. `rate-tests` testar policyn med simulerade läs-/skrivanrop, inklusive asynkron bekräftelse, timeout och avvisade byten. Inget verkligt frekvensbyte har utförts på användarens kort. Byte under pågående ljud stöds inte sömlöst: motorn tystas och stoppas.
+Pre-start rate synchronization and a separate sync button implemented. The master rate is read; only selected physical slave interfaces with mismatching rates are written. The whole group is checked first. `rate-tests` exercises the policy with simulated reads/writes, including asynchronous confirmation, timeout and rejected changes. No actual rate changes performed on the user's interfaces. Changes during audio are not seamless: the engine is silenced and stopped.
 
-## Tillägg: Vilande routingkopplingar
+## Addition: Dormant routing connections
 
-Kanalantalet begränsar nu enbart vilka sparade kopplingar som lämnas till ljudmotorn. Minskning raderar inga rutter. Den fullständiga routingen sparas i preset-filen. Alla fyra testprogram passerar: `core-tests`, `route-tests`, `rate-tests` och nya `preset-tests`. Swift-testet använder samma modell och serialisering som appen och verifierar minskning → sparning/öppning → återökning samt noll kanaler i en riktning. Callback-testet verifierar tystnad för borttagna aktiva rutter och ljud igen efter återaktivering. Detta är tester i process; motsvarande beteende med installerad HAL-drivrutin och fysiska kort är ännu inte verifierat.
+Channel counts now limit only which stored connections reach the engine. Reducing counts deletes no routes. Complete routing is saved in the preset file. All four programs pass: `core-tests`, `route-tests`, `rate-tests` and new `preset-tests`. The Swift test uses the app's model and serialization to verify reduction → save/open → increase, and zero channels in one direction. The callback test verifies silence for removed active routes and audio after reactivation. These are in-process tests; equivalent behavior with an installed HAL driver and physical interfaces remains unverified.
 
-## Tillägg: Automatisk sessionssparning
+## Addition: Automatic session saving
 
-Alla fem testprogram passerar efter införandet av `session-tests`. Det nya testet instansierar appens riktiga `Model` med isolerad temporär sessionsfil och utan hårdvaruinventering. Det kontrollerar automatisk sparning vid direkta fält-/routingändringar, återställning i en ny modell, vilande kopplingar, 0/0 som redigeringsläge, tom kortlista, ökat kanalantal före UI-normalisering, säkerhetskopia av trasig fil och synligt skrivfel. Ingen avslutningssignal eller manuell sparning behövs. Den uppdaterade appen har också avlästs i macOS och visar ”Ändringar sparas automatiskt”. Full avslutning/omstart via UI med användarens routing har inte verifierats.
+All five programs pass after adding `session-tests`. The new test instantiates the app's actual `Model` with an isolated temporary session file and no hardware inventory. It checks automatic saves on direct field/routing edits, restoration in a new model, dormant connections, 0/0 editing mode, empty interface selection, increasing counts before UI normalization, backup of a corrupt file and visible write errors. No termination signal or manual save is needed. The updated app was inspected in macOS and displays “Changes are saved automatically”. Full UI quit/restart with the user's routing remains unverified.
 
-## Tillägg: Egna kanaletiketter
+## Addition: Custom channel labels
 
-Alla fem testprogram passerar. Sessionstestet verifierar separata etiketter för samma kanalnummer på olika kort och i olika riktningar, automatisk återställning, preset-export samt borttagning av en etikett utan att ändra den andra riktningens etikett eller routingen. Presentationen behåller originalnamnen. Äldre presets utan etikettfält fungerar. Appen har startats om och etikettredigeraren har öppnats och inspekterats med tillgänglighetsträd och skärmbild. Testetiketter har inte skrivits till användarens session.
+All five programs pass. Session tests verify separate labels for identical channel numbers on different interfaces and in different directions, automatic restoration, preset export and removal without changing the other direction's label or routing. Presentation preserves original names. Older presets without label fields work. The app was restarted and the label editor opened and inspected through the accessibility tree and a screenshot. Test labels were not written to the user's session.
 
-## Tillägg: Låsta matrisrubriker
+## Addition: Fixed matrix headers
 
-Matrisen använder nu en gemensam NSScrollView för rutorna och två fasta rubrikytor som följer scrollpositionen längs respektive axel. Alla fem testprogram passerar i slutbygget. Visuellt kontrollerat i appen: sidscrollning till MADI-kanalerna behåller DAW-ingångarnas radnamn till vänster; nedscrollning i uppspelningsmatrisen till UFX ADAT/MADI behåller DAW-utgångarnas kolumnnamn överst. En initial ritningsbugg där bakgrunder målades utanför delvyerna rättades med uttrycklig klippning och begränsad bakgrundsfyllning. Ingen routing eller hårdvaruinställning ändrades vid scrollkontrollen.
+The matrix now uses a shared NSScrollView for cells and two fixed header areas following scroll position on their respective axes. All five programs pass in the final build. Visually verified: horizontal scrolling to MADI retains DAW input row names on the left; vertical scrolling in the playback matrix to UFX ADAT/MADI retains DAW output column names at the top. An initial drawing bug painted backgrounds outside subviews; explicit clipping and bounded background fills fixed it. No routing or hardware settings changed during scroll verification.
 
+## Addition: Hover highlighting and direct label editing
 
-## Tillägg: Musmarkering och direkt etikettredigering
+All five programs pass in the final build. Session tests verify channel selection in the label editor, separate virtual DAW labels, matrix row/column indices after scrolling, bounds checks and that hover highlighting does not change routing. Original names and custom labels are now drawn separately so truncation does not hide labels.
 
-Alla fem testprogram passerar i slutbygget. Sessionstestet verifierar kanalval i etiketteditorn, separata virtuella DAW-etiketter samt matrisens rad-/kolumnindex efter scrollning, gränskontroll och att musmarkering inte ändrar routing. Originalnamn och egna etiketter ritas nu separat så att texttrunkering inte döljer etiketten.
+Visually verified: existing RE-201 label appears beneath ZED-R16 Input 1. Double-clicking that header opens the correct direction in the editor with RE-201 selected. The row, column, both headers and cell border highlight at the pointer position. The latest app build is open. User labels, routing and audio settings were unchanged during these UI checks.
 
-Visuellt kontrollerat i appen: den befintliga etiketten RE-201 visas under ZED-R16 Input 1. Dubbelklick på den kanalrubriken öppnar rätt riktning i etiketteditorn med RE-201 markerad i textfältet. Rad, kolumn, båda rubrikerna och rutans ram markeras vid muspositionen i matrisen. Senaste appbygget är öppet. Användarens etiketter, routing och ljudinställningar ändrades inte under dessa UI-kontroller.
+## Addition: To Computer / From Computer and derived labels
 
+All five programs pass. Channel headers, directions, count fields, channel list and errors now use To Computer/From Computer. The editor contains only hardware inputs/outputs. Session tests verify routing-derived labels, multiple destinations, updated hardware labels, fallback names, disconnection, dormant/reactivated channels, ignoring older virtual labels and selecting connected hardware on double-click.
 
-## Tillägg: To Computer / From Computer och härledda etiketter
+App and driver built and signature-checked. The UI tool could read the older running build but rejected restart/close because the app had changed, even after reconnecting. The new UI therefore remains visually unverified in this round; the new build is in Dist/StudioPatch.app. No driver installed.
 
-Alla fem testprogram passerar. Appens kanalrubriker, riktningar, antal-fält, kanallista och feltexter använder nu To Computer/From Computer. Etiketteditorn innehåller endast hårdvarans in- och utgångar. Sessionstestet verifierar härledning från routing, flera destinationer, uppdaterad hårdvaruetikett, reservnamn utan etikett, frånkoppling, vilande/återaktiverade kanaler, att äldre virtuella etiketter ignoreras och att dubbelklick väljer den anslutna hårdvarukanalen.
+## Addition: Confirmation when deselecting interfaces
 
-App och driver är byggda och signaturkontrollerade. UI-verktyget kunde läsa det äldre öppna bygget men avvisade omstart/stängning med meddelandet att appen ändrats, även efter återanslutning. Det nya gränssnittet är därför inte visuellt verifierat i denna omgång; det nya bygget ligger i Dist/StudioPatch.app. Ingen drivrutin installerades.
+All five programs pass. Session tests verify confirmation for deselecting an interface with dormant routing, cancellation preserving interface and connections, confirmation removing only that interface's connections, and immediate selection/deselection without routing. A new app build is in Dist; the dialog was not interactively checked this round.
 
+## Addition: Derived channel names in Core Audio
 
-## Tillägg: Bekräftelse vid avmarkering av ljudkort
+The visible device implements `kAudioObjectPropertyElementName` for input/output scopes, elements 1 through the current count. `kAudioDevicePropertyChannelNameCFString` is the same selector in the local macOS SDK. Names arrive through a separate plugin property and update without format/I/O reconfiguration; property notifications are sent only for changed elements. Name storage, locking and notifications occur outside the realtime callback.
 
-Alla fem testprogram passerar. Sessionstestet verifierar att avmarkering av ett kort med vilande routing kräver bekräftelse, att avbrott behåller kort och kopplingar, att bekräftelse tar bort kortets kopplingar utan att röra ett annat kort, samt att val och avmarkering av kort utan routing sker direkt. Nytt appbygge finns i Dist; dialogen har inte kontrollerats interaktivt i denna omgång.
+All five programs pass. The core test uses the driver's actual property implementation for scope/element, size, CFString ownership, readability, fallback names, Unicode characters, quotes and backslashes, empty names, invalid counts and zero output channels. A simulated host verifies correct notifications, unchanged device ID during renaming with active I/O and persistent storage/reloading through initialization. Swift tests verify that published names derive from the same routing as the matrix, including multiple destinations and unconnected channels. App and driver built and signature-checked.
 
+No driver installed or Core Audio restarted. Tests run in process; publication through the real HAL process and name display/updates in Ableton remain pending. The running app was not restarted this round.
 
-## Tillägg: Härledda kanalnamn i Core Audio
+## Addition: Unavailable selected interfaces
 
-Den synliga enheten implementerar `kAudioObjectPropertyElementName` för in- respektive ut-scope, element 1 till aktuellt kanalantal. `kAudioDevicePropertyChannelNameCFString` är samma selector enligt det lokala macOS SDK:t. Namnen skickas från appen via en separat plugin-egenskap och uppdateras utan format-/IO-omkonfiguration; egenskapsnotiser skickas bara för ändrade element. Namnlagring, låsning och notifieringar ligger utanför realtidscallbacken.
+Last-known interface names, channel names/counts and rate are optional session/preset metadata. Availability always comes from current inventory by UID; old AudioDeviceIDs are not saved. Disconnected interfaces remain in the list and matrix with grey headers, labels and cells. Matrix hit testing and shared model setters allow only removal of connections for unavailable channels. The channel list uses the same setters and blocks unavailable choices. Deselect confirmation includes these interfaces and dormant routes.
 
-Alla fem testprogram passerar. Core-testet använder drivrutinens faktiska property-implementation för scope/element, storlek, ägarskap för CFString, läsbarhet, reservnamn, svenska tecken, citattecken och bakstreck, tomma namn, felaktiga antal och noll utkanaler. En simulerad host verifierar rätt ändringsnotiser, oförändrat enhets-ID vid namnbyte med aktiv I/O samt beständig lagring/återläsning via initialiseringskoden. Swift-testet verifierar att publicerade namn härleds från samma routing som matrisen, inklusive flera destinationer och oanslutna kanaler. App och driver är byggda och signaturkontrollerade.
+All five tests pass. Extended session tests simulate inventory → disconnection → save/restart → edit → reconnection with a new runtime ID → deselection. They check the complete channel set including unrouted channels, labels and derived names, preset export, blocked new routing, permitted removal in both directions, dormant-routing warnings and matrix click blocking. No physical interfaces disconnected or user routing changed.
 
-Ingen drivrutin installerades och Core Audio startades inte om. Tester körs i process; publicering via den riktiga HAL-processen och namnvisning/uppdatering i Ableton återstår. Den redan öppna appen har inte startats om i denna omgång.
+With user approval, the isolated UI test build opened with fictional interfaces and a separate session file. Visually verified: greyed-out interface with checked, clickable checkbox, all four input/output channels retained, saved labels and grey cells in both matrices. UI clicks and inspection of the test session verified removal of existing connections, blocking new and restored connections in both directions, and blocking disconnected input selection in the list. The warning names the interface. Cancel preserves it and routing; Disconnect removes it and its connections in both directions. No real interfaces or user settings changed.
 
+## Addition: Automatic rate synchronization
 
-## Tillägg: Valda ljudkort som inte är tillgängliga
+The manual button is removed and the checkbox is named Follow clock master. Inventory compares selected interfaces and the app rate with the current master. Synchronization runs in a background task; a separate attempt series performs an initial attempt, three immediate retries and then five seconds after each failure. Deselecting or changing the master/interface selection cancels the previous series. Ongoing synchronous driver calls may need to finish. Routing stops before synchronization; name/channel publication and audio startup do not compete with the active automatic series. Errors appear as sidebar status.
 
-Senast kända kortnamn, kanalnamn/antal och frekvens sparas som valfri metadata i session/preset. Tillgänglighet avgörs alltid från aktuell inventering per UID; gamla AudioDeviceID sparas inte. Frånkopplade kort behålls i listan och matrisen med grå rubriker, etiketter och kopplingsrutor. Matrisens klickkontroll och modellens gemensamma setters tillåter bara borttagning av kopplingar för otillgängliga kanaler. Kanallistan använder samma setters och blockerar otillgängliga val. Bekräftelse vid avmarkering omfattar även dessa kort och vilande rutter.
+All five tests pass. Retry policy tested for three immediate retries, continued five-second intervals and a fresh attempt series. Existing rate-tests cover driver errors, timeout and master changes through simulated calls. The full asynchronous UI flow and actual hardware rate changes remain unverified this round. The app was not restarted.
 
-Alla fem tester passerar. Utökade sessionstester simulerar inventering → frånkoppling → sparning/omstart → redigering → återanslutning med nytt runtime-ID → avmarkering. De kontrollerar hela kanaluppsättningen inklusive oroutade kanaler, etiketter och härledda namn, preset-export, blockerad ny routing, tillåten borttagning i båda riktningar, varning för vilande routing och matrisens klickspärr. Inga fysiska ljudkort kopplades från och ingen användarrouting ändrades.
+### Automatic transport margin
 
-Efter användarens godkännande öppnades det isolerade UI-testbygget med påhittade kort och separat sessionsfil. Visuellt verifierat: utgråat kort med ikryssad och klickbar kryssruta, alla fyra in-/utkanaler kvar, sparade etiketter och grå kopplingsrutor i båda matriserna. UI-klick och kontroll av testappens sparade session verifierade att befintliga kopplingar kan tas bort, att nya och återställda kopplingar blockeras i båda riktningarna samt att kanallistan också blockerar val av frånkopplad ingång. Varningen visar kortets namn. Avbryt behåller kortet och routingen; Koppla bort tar bort kortet och dess kopplingar i båda riktningar. Inga riktiga ljudkort eller användarinställningar ändrades.
+Automatic mode is the default, including older sessions, using four selected I/O buffers per direction. The engine payload contains the calculated margin; session/preset stores the manual value and automatic-mode choice separately. The UI shows samples and ms per direction and places manual adjustment under Advanced. Preset tests verify buffer/rate changes, engine payload, manual mode, restoration and older formats. All five suites passed; app and driver built and signatures verified. No new physical audio or latency measurements.
 
+## Installed driver lookup corrected — October 23, 2026
 
-## Tillägg: Automatisk frekvenssynkning
+The first actual HAL test returned system object (1) as the visible device's owner, not the plugin object. The app swallowed the property-read error, and an empty string caused Invalid channel count, sample rate or transport delay during name publication. Bridge now uses kAudioHardwarePropertyTranslateBundleIDToPlugIn with se.studiopatch.driver and reports property-read errors directly. Verified against the installed driver: correct plugin ID 58 and configuration 1 18 18 96000 256. All five suites pass. Corrected app opened without errors; Apply channel counts confirmed in UI. No driver reinstallation required. Audio startup and Ableton audio remain unverified.
 
-Den manuella knappen är borttagen och kryssrutan heter Följ klockmaster. Inventering jämför valda kort och appfrekvens mot aktuell master. Synkning körs på en bakgrundsuppgift; en separat försöksserie gör ett första försök, tre direkta återförsök och sedan fem sekunders väntan efter varje misslyckande. Avmarkering och ändrat master-/korturval avbryter den gamla serien. Redan påbörjade synkrona drivrutinsanrop kan behöva avslutas. Routing stoppas före synkning; namn-/kanalpublicering och ljudstart konkurrerar inte med den aktiva automatiska serien. Fel visas som status i sidopanelen.
+## Startup deadlock — October 23, 2026
 
-Alla fem tester passerar. Retry-policyn är testad för tre direkta återförsök, fortsatt femsekundersintervall och ny försöksserie. Befintliga rate-tests täcker drivrutinsfel, timeout och masterbyte via simulerade anrop. Hela asynkrona UI-förloppet och verkliga frekvensbyten på ljudkorten är inte verifierade i denna omgång. Appen har inte startats om.
+The user's hang report shows Model.start → SPConfigure → SetPropertyData → PatchPlugin.configure → Storage.WriteString, with an explicit deadlock between the driver's XPC thread and Core Audio change queues. Host storage moved to a separate serial dispatch queue with immutable snapshots and without taking the configuration lock. The same fix applies to channel names. The app's atomic session file remains primary storage. A new regression test makes host saving call back into the configuration getter and checks that two snapshots save in order. The core test has a 20-second timeout. All five suites pass; app and driver built and signatures verified. Not yet verified with the updated driver loaded in HAL. The install script's --replace preserves the previous identifier-validated driver outside the HAL directory. The user must update with administrator rights and restart before another audio test.
 
-### Automatisk transportmarginal
+## Remaining PropertiesChanged deadlock — October 23, 2026
 
-Automatik är standard även för äldre sessioner och använder fyra valda I/O-buffertar per riktning. Motorns payload innehåller den beräknade marginalen, medan sessionsfil/preset behåller manuellt värde och automatikval separat. UI visar samples och ms per riktning och placerar manuell inställning under Avancerat. Preset-tester verifierar byte av buffert/frekvens, motorpayload, manuellt läge, återställning och äldre format. Alla fem testsamlingar passerade; app och driver byggdes och signaturverifierades. Ingen ny fysisk ljud- eller latensmätning utförd.
+New actual driver sampling in /tmp/StudioPatch-driver-hang.txt shows Stream.SetIsActive → Object.NotifyPropertiesChanged → synchronous XPC reply from Core Audio. App sampling shows the main thread in Model.init → SPInventory → HAL device enumeration. The storage-call fix was insufficient: host notifications still ran on HAL's calling thread.
 
-## Rättad uppslagning av installerad drivrutin — 23 oktober 2026
+Local libASPL fix: PropertiesChanged and RequestDeviceConfigurationChange now dispatch from a separate serial host queue, with copied data and retained object lifetime. The separate storage queue remains. A regression test uses real Stream.SetPropertyData(IsActive) and a simulated host that waits for the setter to return; synchronous notification would deadlock. Existing name tests now wait for the notification queue.
 
-Vid första verkliga HAL-testet gav den synliga enhetens owner systemobjektet (1), inte pluginobjektet. Appen svalde property-läsfelet, och tom sträng gav Invalid channel count, sample rate or transport delay vid publicering av kanalnamn. Bridge använder nu kAudioHardwarePropertyTranslateBundleIDToPlugIn med se.studiopatch.driver och rapporterar property-läsfel direkt. Verifierat mot installerad drivrutin: korrekt plugin-ID 58 och konfiguration 1 18 18 96000 256. Alla fem testsamlingar passerar. Rättad app öppnad utan fel; Tillämpa kanalantal bekräftades i UI. Ingen ominstallation av driver behövdes. Audio-start och Ableton-ljud är ännu inte verifierade.
+All Core Audio calls from the Swift model moved to a serial background queue, including inventory, names, configuration, start/stop, status and synchronization. An ongoing operation blocks new polling/button calls; after five seconds, waiting status appears without pretending to cancel the call. Quitting attempts to stop the engine but waits at most two seconds for the audio server. Unknown device status is distinguished from successful inventory without StudioPatch. A new async Model test blocks inventory with a semaphore and verifies that MainActor continues, parallel polling queues no additional reads and status becomes known after release. All five suites pass; app/driver built and signatures verified. The updated driver requires installation and loading after restart before actual audio testing. No automatic audio-server or computer restart performed.
 
-## Deadlock vid start — 23 oktober 2026
+## Ableton buffer range too narrow — October 23, 2026
 
-Användarens hängrapport visar Model.start → SPConfigure → SetPropertyData → PatchPlugin.configure → Storage.WriteString, med en explicit deadlock mellan drivrutinens XPC-tråd och Core Audios ändringsköer. Host-lagring har flyttats till en separat seriell dispatch-kö med oföränderliga snapshots och utan att kön tar konfigurationslåset. Samma rättning används för kanalnamn. Appens atomiska sessionsfil finns kvar som primär lagring. Nytt regressionstest låter host-sparningen återanropa konfigurationsgettern och kontrollerar att två snapshots sparas i ordning. Kärntestet har 20 sekunders timeout. Alla fem testsamlingar passerar; app och driver byggda och signaturverifierade. Detta är ännu inte verifierat med den uppdaterade drivrutinen laddad i HAL. Installationsskriptets --replace bevarar den tidigare identifierarvaliderade drivrutinen utanför HAL-katalogen. Användaren behöver uppdatera med administratörsrättigheter och starta om innan nytt ljudtest.
+A read-only HAL probe of the installed driver showed StudioPatch ZeroTimeStampPeriod=128 and BufferFrameSizeRange=29..48, while UFX III and BlackHole reported period=16384 and range=29..4096. This explains why 32 was the only common power-of-two size in Ableton. The SDK's AudioServerPlugIn.h documents a minimum of 10923 frames for ZeroTimeStampPeriod. Both StudioPatch endpoints now use RingFrames=16384 for the advertised period and GetZeroTimeStamp quantization. Transport delay and I/O buffer size are unchanged; the clock period does not require filling an entire ring before reading.
 
-## Återstående deadlock i PropertiesChanged — 23 oktober 2026
+Regression tests verify the minimum period, identical advertised periods, timestamps at period boundaries, shared seed and timebase. All five suites passed. Pre-fix CPU snapshot: Ableton about 199%, ZED driver 41%, coreaudiod 15%, RME 12%, StudioPatch app 1.3% (process percentages, not Ableton's audio-load meter). Ableton sampling shows active audio processing including plugins; no single cause of all CPU load identified. Actual new buffer range and CPU require verification after installation/restart. No driver reloaded during this investigation.
 
-Ny faktisk drivrutinssampling /tmp/StudioPatch-driver-hang.txt visar Stream.SetIsActive → Object.NotifyPropertiesChanged → synkront XPC-svar från Core Audio. Appsamplingen visar huvudtråden i Model.init → SPInventory → HAL-enhetsuppräkning. Förra rättningen av lagringsanropet var otillräcklig: host-notifieringar gjordes fortfarande på HAL:s anropstråd.
+## Stable status layout and one stop button — October 23, 2026
 
-Lokal libASPL-rättning: PropertiesChanged och RequestDeviceConfigurationChange skickas nu från separat seriell host-kö, med kopierade data och kvarhållen objektlivstid. Lagringens separata kö behålls. Regressionstestet använder riktig Stream.SetPropertyData(IsActive) och en simulerad host som väntar på att settern återvänder; synkron notifiering skulle låsa testet. Befintliga kanalnamnstester inväntar nu notiskön.
+The user's screen recording showed two overlapping stop buttons. Sidebar settings now have their own disabled group; the single start/stop button sits outside it and the overlay button is removed. Routine polling no longer shows a temporary status row. Operation status reserves height even when empty; audio status is limited to one line with monospaced digits so the cycle counter cannot change layout height. The five-second warning and serialized Core Audio calls remain.
 
-Alla Core Audio-anrop från Swift-modellen flyttades till en seriell bakgrundskö, inklusive inventering, namn, konfiguration, start/stopp, status och frekvenssynkning. En pågående operation blockerar nya anrop från polling/knappar; efter fem sekunder visas väntestatus utan att låtsas avbryta anropet. Avslut försöker stoppa motorn men väntar högst två sekunder på ljudservern. Okänd enhetsstatus skiljs från en lyckad inventering utan StudioPatch. Nytt async Model-test blockerar inventering med semaphore och verifierar att MainActor fortsätter, parallell polling inte köar nya läsningar och status blir känd efter frigörning. Alla fem testsamlingar passerar; app/driver byggda och signaturverifierade. Uppdaterad drivrutin måste installeras och laddas efter omstart innan verkligt ljudtest. Ingen automatisk omstart av ljudserver eller dator gjordes.
+All five tests passed. The async model test checks that routine polling is silent but still blocks overlapping native calls. App built and signature verified. The user's running app was not restarted; the new layout remains visually unverified there. This UI change requires no driver installation.
 
-## För snävt buffertintervall i Ableton — 23 oktober 2026
+## Background service and automatic format changes — October 23, 2026
 
-Read-only HAL-probe mot installerad drivrutin visade StudioPatch ZeroTimeStampPeriod=128 och BufferFrameSizeRange=29..48, medan UFX III och BlackHole rapporterade period=16384 och intervall=29..4096. Det förklarar varför endast 32 är en vanlig tvåpotensstorlek i Abletons val. SDK:s AudioServerPlugIn.h dokumenterar minst 10923 frames för ZeroTimeStampPeriod. Båda StudioPatch-ändpunkter använder nu RingFrames=16384 för både den annonserade perioden och kvantiseringen av GetZeroTimeStamp. Transportfördröjning och I/O-buffertstorlek är oförändrade; klockperioden innebär inte att en hel ring måste fyllas före läsning.
+StudioPatchService is a separate signed executable in the app bundle. It continues independently of the panel window/process. The panel saves requests atomically; the service only reads the session and exclusively owns the engine. The panel reads timestamped status with device inventory. Start/Stop/Apply are removed from the UI, and routing/channels can be edited during operation. The service applies changes and retries automatically. Routing-only edits currently cause a brief transport restart, not a seamless snapshot switch.
 
-Regressionstest verifierar periodens minimigräns, identiska annonserade perioder, timestamps på periodgränser, gemensam seed och tidsbas. Alla fem testsamlingar passerade. CPU-ögonblicksbild före rättning: Ableton ca 199 %, ZED-drivrutin 41 %, coreaudiod 15 %, RME 12 %, StudioPatch-app 1,3 % (processprocent, inte Abletons egen ljudbelastningsmätare). Ableton-sampling visar aktiv ljudbearbetning inklusive plugins; ingen ensam orsak till all CPU-belastning fastställd. Nytt faktiskt buffertintervall och CPU efter ändringen måste verifieras efter installation och omstart. Ingen drivrutin laddades om i denna felsökning.
+Driver: HAL-scheduled changes on existing endpoint IDs, new streams and a shared session. Old/new rings stay silent during transition; readiness publishes only after both endpoint configurations are confirmed. Async completion callbacks do not take the plugin lock under the device lock. Abort leaves audio silent. A new timebase generates a new timestamp seed. AvailableNominalSampleRates and allowed stream formats come from the master within 8–384 kHz. Client nominal/stream-format requests publish to the service; it sets the master, then other interfaces, verifies rates, changes virtual configuration and starts transport. Acknowledgement uses compare/exchange so an old reply cannot erase a newer request.
 
-## Stabil statuslayout och en stoppknapp — 23 oktober 2026
+The panel requests notification permission; the service sends notifications only when macOS grants it. Each error generates at most one notification until recovery. Errors appear in panel status without a modal. install-service.sh prepares login startup without sudo; the helper's single-instance lock prevents duplicate engines.
 
-Användarens skärminspelning visade två överlappande stoppknappar. Sidopanelens inställningar har nu egen disabled-grupp; samma enda start/stoppknapp ligger utanför den gruppen och overlay-knappen är borttagen. Rutinpolling visar inte längre en tillfällig statusrad. Operationsstatus har reserverad höjd även när den är tom; ljudstatus begränsas till en rad med monospaced siffror så att cykelräknaren inte ändrar layoutens höjd. Femsekundersvarningen och serialiseringen av Core Audio-anrop behålls.
+All six suites pass, including extended core-tests for active configuration, stable device ID, 4/2 and 1/0, preferred channel counts, 192 kHz, format lists and muted old rings. Scripts/test-runtime.sh builds the real Swift service/Model with a simulated native backend and runs it as a separate process: automatic startup without the panel, singleton behavior, route changes, silence on failure, automatic recovery and acknowledged client rate all pass. Test files are isolated from the user's session. This is not a physical audio test; actual HAL/Ableton verification, login startup and notifications require installation and user testing. The older running app and installed driver were unchanged.
 
-Alla fem tester passerade. Async modelltest kontrollerar att rutinpolling är tyst men fortfarande blockerar överlappande native-anrop. App byggd och signaturverifierad. Den pågående användarappen startades inte om; den nya layouten är ännu inte visuellt verifierad i den körande appen. Ingen drivrutinsinstallation behövs för denna UI-ändring.
+## HAL registration of rate control — October 23, 2026
 
-## Bakgrundstjänst och automatiska formatbyten — 23 oktober 2026
+After user installation/restart, the service was active but reported needing a new driver. Installed and distributed driver SHA-256 matched (cb4b0a592577a58b95e045692061e49209e6fc12c0719b644d04ba5d0f06fa1d), ruling out missed installation. RatesProperty (sprt) implemented HasProperty/SetPropertyData but was missing from RegisterCustomProperty and hence HAL's CustomPropertyInfoList. Clients could not see it through Core Audio. It is now registered as CFString and can be read back. A new regression checks all six used custom properties in the HAL registry with correct types and reads the rate list. The native error now describes the missing property instead of claiming the correct version is absent. Installation/reloading is required before actual audio startup can be verified.
 
-StudioPatchService är en separat signerad körfil i apppaketet. Den fortsätter oberoende av kontrollpanelens fönster/process. Kontrollpanelen sparar önskemål atomiskt; tjänsten är enbart läsare av sessionen och ensam ägare av ljudmotorn. Tidsstämplad status med enhetsinventering läses av panelen. Start/stopp/Tillämpa är borttagna ur UI och routing/kanaler går att redigera under drift. Tjänsten tillämpar ändringar och återförsöker automatiskt. Rena routingändringar gör för närvarande en kort transportomstart, inte ett avbrottsfritt snapshotbyte.
+## Rate payload and restoration before HAL publication — October 23, 2026
 
-Driver: HAL-schemalagda ändringar på befintliga endpoint-ID:n, nya strömmar och gemensam session. Gamla och nya ringar hålls tysta under övergången; readiness publiceras först när båda endpoint-konfigurationerna bekräftats. Asynkrona completion-callbackar tar inte pluginlåset under enhetens lås. Abort lämnar ljudet tyst. Ny tidsbas ger ny timestamp-seed. AvailableNominalSampleRates och tillåtna strömformat kommer från masterkortet inom 8–384 kHz. Klientens nominella/strömformatsbegäran publiceras till tjänsten; tjänsten ställer först master och sedan övriga kort, verifierar frekvens, byter virtuell konfiguration och startar transport. Acknowledgement använder compare/exchange så att en senare begäran inte raderas av ett gammalt svar.
+Installed and distributed drivers had identical SHA-256 f8db7ebd0caf984d391123973dee4254884ed28a60f6c8eb3b70440443dd35aa. Error 1852797029 is 'nope'. UFX III reported seven rates: 32000, 44100, 48000, 88200, 96000, 176400, 192000. The long numeric text exceeded the server's conservative 256-byte UTF-8 allocation limit. RateWire now uses shorter lossless exponent notation when it saves space. A regression sends this exact UFX list through driver.SetPropertyData and checks all values and the CFString bound. A live probe of installed HAL accepted the list and returned masterRate=96000, requested=0.
 
-Systemnotiser begärs av kontrollpanelen och skickas av tjänsten endast om macOS har beviljat tillstånd. Ett fel ger högst en notis fram till återhämtning. Fel visas i panelens status utan felmodal. Inloggningsstart förbereds av install-service.sh utan sudo; helperns single-instance-lås förhindrar dubbla motorer.
+After updating the service, both ZED and UFX synchronized to 96000. The next error was Request virtual configuration 'nope'. A read-only live probe showed Ready=0 and remaining default configuration 1 18 18 96000 256. Initialize restored saved configuration using asynchronous change requests for devices HAL had not yet published. Immediate host.RequestDeviceConfigurationChange rejection was also ignored, leaving the configuring flag set.
 
-Alla sex testsamlingar passerar inklusive utökade core-tests för aktiv konfiguration, stabilt enhets-ID, 4/2 och 1/0, prefererat kanalantal, 192 kHz, formatlista och mutad gammal ring. Scripts/test-runtime.sh bygger riktig Swift-service/Model med en simulerad native-backend och kör den som separat process: automatisk start utan panel, singleton, ändrade routes, tystnad vid fel, automatisk återhämtning och kvitterad klientfrekvens passerar. Testfilerna isoleras från användarsessionen. Detta är inte ett fysiskt ljudtest; faktisk HAL/Ableton-verifiering, inloggningsstart och systemnotiser kräver installation och användartest. Den körande äldre appen och systemets installerade driver har inte ändrats.
-
-## HAL-registrering av frekvensstyrning — 23 oktober 2026
-
-Efter användarens installation/omstart var tjänsten aktiv men rapporterade att en ny driver behövdes. SHA-256 för installerad driver och distribuerad driver var identiska (cb4b0a592577a58b95e045692061e49209e6fc12c0719b644d04ba5d0f06fa1d). Felet var alltså inte en missad installation. RatesProperty (sprt) hade HasProperty/SetPropertyData-implementation men saknades i RegisterCustomProperty och därmed i HAL:s CustomPropertyInfoList. Detta hindrade klienten från att se egenskapen via Core Audio. Den registreras nu som CFString och kan läsas tillbaka. Nytt regressionstest kontrollerar att samtliga sex använda custom properties finns i HAL-registret med korrekt datatyp, samt att frekvenslistan går att läsa. Native-feltexten beskriver nu den saknade egenskapen i stället för att påstå att rätt version inte installerats. Rättningen behöver installeras och laddas om innan verklig ljudstart kan verifieras.
-
-## Frekvenspayload och återställning före HAL-publicering — 23 oktober 2026
-
-Faktiskt installerad och distribuerad driver hade identisk SHA-256 f8db7ebd0caf984d391123973dee4254884ed28a60f6c8eb3b70440443dd35aa. Felet 1852797029 är 'nope'. UFX III rapporterade sju frekvenser: 32000, 44100, 48000, 88200, 96000, 176400, 192000. Den långa numeriska texten överskred serverns konservativa 256-byte UTF-8-allokeringsgräns. RateWire använder nu kortare förlustfri exponentnotation där det sparar plats. Regressionstest skickar just UFX-listan genom driver.SetPropertyData och verifierar samtliga värden och CFString-gränsen. Live-probe mot installerad HAL accepterade listan och returnerade masterRate=96000, requested=0.
-
-Efter uppdatering av bakgrundstjänsten synkroniserades både ZED och UFX till 96000. Nästa fel var Begär virtuell konfiguration 'nope'. Read-only live-probe visade Ready=0 och kvarvarande defaultkonfiguration 1 18 18 96000 256. Initialize återställde sparad konfiguration med asynkrona förändringsbegäranden för enheter HAL ännu inte publicerat. Dessutom ignorerades omedelbart avslag från host.RequestDeviceConfigurationChange, vilket lämnade configuring-flaggan satt.
-
-Restore under Initialize kopplar nu tillfälligt loss de ännu opublicerade endpoint-objekten från pluginhierarkin, utför deras konfiguration synkront och återansluter dem före Initialize returnerar. Runtime-ändringar använder fortfarande HAL:s asynkrona mekanism. LibASPL aborterar uttryckligen en begäran som host omedelbart nekar. Regressionstest verifierar att initial återställning inte skickar konfigurationsbegäranden, att Ready är sant efter återställning samt att avslag under drift släpper pending-läget och tillåter nytt försök. Denna drivrutinsändring kräver installation/omstart; faktisk ljudstart kan därför inte bekräftas i samma körning.
+Restore during Initialize now temporarily detaches unpublished endpoints from the plugin hierarchy, configures them synchronously and reconnects them before Initialize returns. Runtime changes still use HAL's async mechanism. LibASPL explicitly aborts requests immediately rejected by the host. Regression tests verify that initial restore sends no configuration requests, Ready is true afterward, and runtime rejection clears pending state and allows retry. This driver change requires installation/restart, so actual audio startup cannot be confirmed in the same run.
 
 ## Format notifications (2026-10-23)
 

@@ -41,7 +41,8 @@ static void testChannelNames() {
     assert(p->configure(Config::parse("1 2 3 96000 256"),false)==noErr);
     auto d=p->GetDeviceByIndex(0);
     assert(readName(d,true,1)=="To Computer 1" && readName(d,false,3)=="From Computer 3");
-    ChannelNames names{{"Sång \"A\"", "RE-201"},{"Monitor L · Monitor R","", "FX\\Return"}};
+    // Keep a non-ASCII character to exercise Unicode name round-tripping.
+    ChannelNames names{{"Vocal \u00e5 \"A\"", "RE-201"},{"Monitor L · Monitor R","", "FX\\Return"}};
     assert(ChannelNames::parse(names.encode())==names);
     for (const auto& invalid : {std::string("1 129 0"),std::string("1 1 0 unquoted"),names.encode()+" trailing"}) {
         bool rejected=false; try { ChannelNames::parse(invalid); } catch (...) { rejected=true; } assert(rejected);

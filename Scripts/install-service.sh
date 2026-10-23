@@ -1,6 +1,6 @@
 #!/bin/bash
 set -euo pipefail
-if [[ $EUID == 0 ]]; then echo 'Kör detta som din vanliga användare, utan sudo.'; exit 1; fi
+if [[ $EUID == 0 ]]; then echo 'Run this as your regular user, without sudo.'; exit 1; fi
 task_root="$(cd "$(dirname "$0")/.." && pwd)"
 task_binary="$task_root/Dist/StudioPatch.app/Contents/MacOS/StudioPatchService"
 codesign --verify --strict "$task_root/Dist/StudioPatch.app"
@@ -17,4 +17,4 @@ if [[ -f "$task_plist" ]]; then cp "$task_plist" "$task_plist.previous"; fi
 /usr/bin/plutil -insert KeepAlive.SuccessfulExit -bool NO "$task_plist"
 /usr/bin/plutil -insert ThrottleInterval -integer 5 "$task_plist"
 chmod 600 "$task_plist"
-echo 'Bakgrundsmotorn är registrerad för nästa inloggning. Starta om efter drivrutinsinstallationen.'
+echo 'The background engine is registered for the next login. Restart after installing the driver.'

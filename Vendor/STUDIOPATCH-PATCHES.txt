@@ -1,9 +1,9 @@
-Lokala libASPL-ändringar, 23 oktober 2026
-Object.cpp: NotifyPropertiesChanged skickar host-anrop asynkront via HostCallbacks.hpp.
-Device.cpp: RequestDeviceConfigurationChange skickas via samma kö.
-HostCallbacks.hpp: separat seriell dispatch-kö; fångade objekt håller livstiden och notiser äger sina adresser.
-Motiv: faktisk macOS 27-stackrapport visar att synkron host-notis från Stream.SetIsActive låser drivrutin/Core Audio.
-CoreTests.cpp i StudioPatch testar återvändande setter innan host slutför notifieringen.
-Detta är en lokal rättning, inte en uppströmsändring.
+Local libASPL changes, October 23, 2026
+Object.cpp: NotifyPropertiesChanged dispatches host calls asynchronously through HostCallbacks.hpp.
+Device.cpp: RequestDeviceConfigurationChange uses the same queue.
+HostCallbacks.hpp: separate serial dispatch queue; captured objects retain their lifetime and notifications own their addresses.
+Reason: an actual macOS 27 stack report shows that synchronous host notification from Stream.SetIsActive deadlocks the driver/Core Audio.
+StudioPatch's CoreTests.cpp checks that the setter returns before the host finishes notification.
+This is a local fix, not an upstream change.
 
 2026-10-23: RequestConfigurationChange now handles an immediate host rejection by calling AbortConfigurationChange, so application-level completion state does not remain pending forever for a rejected request. Callback retains a Device-typed shared pointer. Covered by testInitializeAndRejectedChanges.

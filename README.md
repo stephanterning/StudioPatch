@@ -1,14 +1,8 @@
-# StudioPatch — utvecklarprototyp 0.1
+# StudioPatch — development prototype 0.1
 
 ## Open-source repository
 
-StudioPatch is an experimental macOS virtual audio device and routing control panel. The original StudioPatch code is licensed under the [GNU Affero General Public License, version 3 only (AGPL-3.0-only)](LICENSE). Copyright (c) 2026 Stephan Terning.
-
-StudioPatch is free software: you can redistribute it and/or modify it under the terms of version 3 of the GNU Affero General Public License as published by the Free Software Foundation. It is distributed without any warranty; without even the implied warranty of merchantability or fitness for a particular purpose. See [LICENSE](LICENSE) for the full terms.
-
-The aim is to give back to the community: when sharing covered versions, or letting users interact with a modified version over a network, provide the corresponding source code as required by the license.
-
-Vendored libASPL and its Apple-derived portions retain their [upstream licenses](Vendor/libASPL/LICENSE), [Apple 2012 notice](Vendor/libASPL/LICENSE.apple2012) and [Apple 2020 notice](Vendor/libASPL/LICENSE.apple2020).
+StudioPatch is an experimental macOS virtual audio device and routing control panel. The original StudioPatch code is licensed under the [GNU Affero General Public License, version 3 only (AGPL-3.0-only)](LICENSE).
 
 For development, use macOS 14 or later, Xcode with its command-line tools, CMake and Python 3. Provide your own certificate-backed signing identity via `STUDIOPATCH_SIGNING_IDENTITY` or a local `Scripts/signing-identity.txt` file. That file, build products and private keys are excluded from Git.
 
@@ -24,115 +18,115 @@ bash Scripts/test-runtime.sh
 Build products are written to `Dist/`. Building does not install the driver or restart audio services. Read [BACKGROUND-RUNTIME.md](BACKGROUND-RUNTIME.md) before installation and [Docs/LATENCY-PLAN.md](Docs/LATENCY-PLAN.md) before latency work. The historical development notes below include superseded behavior; the handoff notice identifies those limitations.
 
 
-> **Aktuell överlämning, 2026-10-23:** [Plan för latensarbetet](Docs/LATENCY-PLAN.md), [baslinjeanalys](Docs/LATENCY-REVIEW-2026-10-23.md) och [mätprotokoll](Docs/LATENCY-RUN-TEMPLATE.md). Latensoptimering och fysisk loopbackmätning har inte påbörjats. Arbetet återupptas först på användarens begäran.
+> **Current handoff, 2026-10-23:** [Latency plan](Docs/LATENCY-PLAN.md), [baseline review](Docs/LATENCY-REVIEW-2026-10-23.md) and [measurement record](Docs/LATENCY-RUN-TEMPLATE.md). Latency optimization and physical loopback measurements have not started. Work resumes only at the user's request.
 >
-> **Historikvarning:** Flera avsnitt nedan beskriver äldre prototyper och är inte aktuella handhavandeinstruktioner. Nu körs routingen automatiskt i en bakgrundstjänst; appen är en kontrollpanel. Det finns individuella synklås, inbyggda namngivna presets och beständig aktiv preset med osparade ändringar. App och tjänst certifikatsigneras. Manuell Start/Stop, filbaserade presetknappar, global Följ klockmaster och automatisk ad hoc-signering gäller inte längre. Se den nya planens avsnitt om nuläge, byggning och återställning innan fortsatt arbete.
+> **Historical notice:** Several sections below describe older prototypes and are not current operating instructions. Routing now runs automatically in a background service; the app is a control panel. Individual synchronization locks, built-in named presets and a persistent active preset with unsaved changes are available. The app and service use certificate signing. Manual Start/Stop, file-based preset buttons, global Follow clock master and automatic ad hoc signing no longer apply. Read the new plan's current-state, build and recovery sections before continuing.
 
-En lokal macOS-app och en virtuell Core Audio-drivrutin för fritt ordnade kanaler från flera ljudkort. Avsedd för UFX III (inklusive dess MADI-kanaler från M-1610 Pro) och ZED-R16.
+A local macOS app and virtual Core Audio driver for freely ordered channels from multiple audio interfaces. Intended for UFX III (including MADI channels from the M-1610 Pro) and ZED-R16.
 
-**Status: byggbar prototyp, inte en verifierad ersättare för RME-drivrutinen.** Ljudlogik och kanalmodell testas i process. Laddning i Core Audio, drift med Ableton och fysisk tur-och-returlatens återstår att verifiera. Inget ljud spelas upp när appen öppnas. Vid första starten är alla rutter frånkopplade; senare starter återställer den senaste sessionen.
+**Status: buildable prototype, not a verified replacement for the RME driver.** Audio logic and the channel model are tested in process. Core Audio loading, Ableton operation and physical round-trip latency remain to be verified. Opening the app produces no audio. All routes are disconnected on first launch; subsequent launches restore the last session.
 
-## Vad som är implementerat
+## Implemented features
 
-- En synlig enhet, `StudioPatch`, med oberoende antal in- och utgångar: 0–128 per riktning, minst en riktning aktiv. Exempel: 37 in/21 ut, utan utfyllnad till en tvåpotens.
-- Valda kort som försvinner finns kvar utgråade i kortlistan och matrisen. Namn, samtliga kanaler och etiketter hämtas från den senast sparade inventeringen, även efter omstart och i exporterade presets. Befintliga kopplingar kan tas bort, men nya kopplingar till/från kortet blockeras i både matris och kanallista. Kryssrutan går fortfarande att avmarkera. När samma enhets-UID återkommer används dess aktuella kanaler och normal redigering återaktiveras. Listan uppdateras automatiskt varannan sekund när routingen är stoppad. Äldre presets utan sparad kanalinformation måste öppnas med kortet tillgängligt en gång för att få denna information; okända kort visas annars med UID och statusen att kanalinformation saknas.
-- Avmarkering av ett ljudkort med sparade in- eller utkopplingar kräver bekräftelse. Varningen visar kortets namn och omfattar även vilande kopplingar. **Avbryt** lämnar kort och routing oförändrade; **Koppla bort** tar bort kortet och dess kopplingar. Kort utan kopplingar avmarkeras direkt.
-- Den virtuella enhetens kanalnamn i Core Audio är den härledda etiketten, exempelvis `RE-201`. Utan anslutning används `To Computer N` respektive `From Computer N`. Saknas egen hårdvaruetikett används hårdvarans kanalnamn; flera destinationers namn sammanfogas. Appen publicerar ändringar automatiskt efter kort fördröjning och vid tillämpning/start. Namnändringar skickas separat från ljudkonfigurationen, med Core Audio-notiser, och kräver ingen omstart av enheten. Vid ännu ej tillämpat kanalantal väntar namnpubliceringen tills layouten matchar. Namnen sparas även i drivrutinens beständiga lagring. Detta kräver det nya drivrutinsbygget; faktisk visning och uppdatering i Ableton återstår att verifiera.
-- Två oberoende ljudvägar och två matriser: hårdvaruingång → To Computer respektive From Computer → hårdvaruutgång. Ingen automatisk loopback mellan From Computer och To Computer.
-- En källa per destination, valfri förgrening till flera destinationer. Ingen summering, gain eller DSP i denna version.
-- Matrisens rubriker är låsta som i ”Lås fönsterrutor”: radnamnen stannar till vänster vid sidscrollning, och kolumnnamnen ligger kvar överst vid vertikal scrollning. Varje rubrik följer sina rutor längs den andra axeln. Det gäller båda routingriktningarna, inklusive egna etiketter.
-- Riktiga kanalnamn hämtas från drivrutinerna, bland annat UFX Analog, Mic, AES, ADAT och MADI. UI och preset-filer använder kanalnummer från **1**.
-- När muspekaren ligger över en ruta markeras dess rad och kolumn, inklusive kanalrubrikerna. Rutan får en tydlig ram. Markeringen ändrar inga kopplingar.
-- Dubbelklicka på en hårdvarurubrik för att öppna **Etiketter…**, scrolla till kanalen och fokusera dess etikettfält. På To Computer/From Computer öppnas den anslutna hårdvarukanalen; vid flera destinationer öppnas den första i kortens kanalordning. Utan anslutning öppnas ingen redigerare.
-- **Etiketter…** öppnar en redigerare för egna etiketter på hårdvarans in- och utgångar. To Computer och From Computer kan inte ha egna etiketter: de härleds från anslutna hårdvarukanaler och uppdateras när routing eller hårdvaruetikett ändras. Om etikett saknas används hårdvarans kanalnamn. Flera destinationers namn sammanfogas, med identiska namn visade en gång. Äldre egna etiketter på virtuella kanaler ignoreras. I matrisen visas etiketten på en separat cyanblå rad under originalnamnet. Etiketten kompletterar kortets namn och kanalnamn i matris och kanallista, exempelvis `UFX III · Analog 9 — Sångmikrofon`. Etiketter sparas per enhets-UID, riktning och kanal, även utan routing eller när kanalen inte används. De ingår i automatisk sessionssparning och exporterade presets. Töm textfältet för att ta bort en etikett. Hårdvarans originalnamn ändras inte. StudioPatch-enhetens exponerade kanalnamn härleds däremot från dessa etiketter och routingen.
-- Enhetskopplingar sparas med Core Audio UID, inte tillfälligt enhetsnummer. JSON-presets kan öppnas och sparas.
-- Varje ändring sparas automatiskt i `~/Library/Application Support/StudioPatch/last-session.json` med atomisk filersättning. Kanalantal, hela routingen inklusive vilande kopplingar, valda kort, klockmaster och buffert-/frekvensval återställs vid nästa start. Även 0/0 kan sparas som redigeringsläge, men kan inte startas som ljudenhet. En tom kortlista eller tillfälligt saknade kort ersätts inte av standardval vid återställning. Routing startar inte automatiskt. Sparfel visas i appen; en oläsbar sessionsfil säkerhetskopieras innan den ersätts efter nästa ändring. **Spara preset…** finns kvar för egna namngivna presets.
-- I båda riktningarna får en källa gå till flera destinationer. Varje destination får högst en källa; ett nytt val ersätter dess tidigare koppling. Ingen summering eller mixning görs. Presets med flera källor till samma destination avvisas, även om någon av kopplingarna är vilande.
-- Kanalantal och sparad routing hanteras separat. När antalet exponerade kanaler minskas blir deras kopplingar vilande: de skickas inte till ljudmotorn och ger inget ljud. När kanalantalet ökas återkommer kopplingarna, även efter att en preset sparats och öppnats. Kanallistan markerar vilande utgångskopplingar. Ett uttryckligt val av en ny koppling eller ”Ej ansluten” ersätter den tidigare kopplingen till samma destination.
-- Ändring av kanalantal/frekvens avvisas medan den virtuella enheten används. Stoppa routingen och avaktivera DAW-ljudmotorn först.
-- En privat Aggregate Device för ljudmotorn. Användarens befintliga Aggregate Device och standardenheter ändras inte av appen.
-- Följ klockmaster: övervakar masterns frekvens och synkar automatiskt övriga valda fysiska kort vid avvikelse, även utan installerad virtuell drivrutin. Mastern ändras aldrig. Efter ett misslyckat försök görs tre direkta återförsök; därefter väntar appen fem sekunder mellan varje försök. Status visas i sidopanelen. Avmarkering stoppar fortsatta försök; ett redan påbörjat drivrutinsanrop kan behöva avslutas. Byte av master eller korturval startar en ny försöksserie. Pågående routing stoppas före synkning och återstartas inte automatiskt.
-- Saknad kanal eller misslyckad frekvenssynkning blockerar start. Enhets-/formatändring under drift tystar utgångarna och stoppar routingen vid nästa statuskontroll.
+- One visible device, `StudioPatch`, with independent input and output counts: 0–128 per direction, at least one direction active. For example, 37 inputs/21 outputs, without padding to a power of two.
+- Selected interfaces that disappear remain greyed out in the interface list and matrix. Names, all channels and labels come from the last saved inventory, including after restart and in exported presets. Existing connections can be removed, but new connections to/from the interface are blocked in both the matrix and channel list. The checkbox can still be cleared. When the same device UID returns, its current channels are used and normal editing resumes. The list refreshes every two seconds while routing is stopped. Older presets without stored channel information must be opened once with the interface available to acquire it; otherwise unknown interfaces show their UID and a missing-channel-information status.
+- Deselecting an interface with stored input or output connections requires confirmation. The warning names the interface and includes dormant connections. **Cancel** preserves the interface and routing; **Disconnect** removes the interface and its connections. Interfaces without connections are deselected immediately.
+- Virtual-device channel names in Core Audio use the derived label, such as `RE-201`. Unconnected channels use `To Computer N` or `From Computer N`. Without a custom hardware label, the hardware channel name is used; multiple destination names are joined. Changes are published automatically after a short delay and on apply/start. Names are sent separately from audio configuration, with Core Audio notifications, and require no device restart. If a channel count has not yet been applied, name publication waits for the matching layout. Names are also persisted by the driver. This requires the new driver build; actual display and updates in Ableton remain to be verified.
+- Two independent audio paths and matrices: hardware input → To Computer, and From Computer → hardware output. No automatic loopback from From Computer to To Computer.
+- One source per destination, with unrestricted fan-out. No summing, gain or DSP in this version.
+- Matrix headers behave like frozen panes: row names stay on the left during horizontal scrolling and column names stay at the top during vertical scrolling. Each header follows its cells on the other axis. This applies to both routing directions and custom labels.
+- Real channel names come from the drivers, including UFX Analog, Mic, AES, ADAT and MADI. UI and preset channel numbers start at **1**.
+- Hovering over a cell highlights its row and column, including headers, and gives the cell a clear border. Highlighting does not change connections.
+- Double-click a hardware header to open **Labels…**, scroll to the channel and focus its label field. For To Computer/From Computer, this opens the connected hardware channel; with multiple destinations, it selects the first in interface channel order. No editor opens for an unconnected channel.
+- **Labels…** edits custom hardware input/output labels. To Computer and From Computer cannot have independent labels: they are derived from connected hardware channels and update with routing or hardware labels. Missing labels fall back to hardware channel names. Multiple destination names are joined, with duplicates shown once. Older custom virtual-channel labels are ignored. Matrix labels appear on a separate cyan line below the original name. They supplement the interface and channel name in the matrix and list, for example `UFX III · Analog 9 — Vocal microphone`. Labels are stored by device UID, direction and channel, even without routing or when unused. They are included in automatic session saves and exported presets. Clear a field to remove its label. Original hardware names remain unchanged; exposed StudioPatch names are derived from these labels and routing.
+- Device connections use Core Audio UIDs, not temporary device numbers. JSON presets can be opened and saved.
+- Every change is saved automatically to `~/Library/Application Support/StudioPatch/last-session.json` using atomic replacement. Channel counts, all routing including dormant connections, selected interfaces, clock master and buffer/rate choices are restored at launch. A 0/0 editing state can be saved but cannot start as an audio device. An empty interface list or temporarily missing interfaces are not replaced with defaults on restore. Routing does not start automatically. Save errors appear in the app; an unreadable session file is backed up before replacement after the next edit. **Save preset…** remains available for named presets.
+- In either direction, a source can feed multiple destinations. Each destination has at most one source; a new selection replaces its previous connection. There is no summing or mixing. Presets with multiple sources for one destination are rejected, even if some connections are dormant.
+- Channel counts and stored routing are separate. Reducing exposed channel counts makes their connections dormant: they are not sent to the engine and produce no audio. Increasing the counts restores them, including after saving and reopening a preset. The channel list marks dormant output connections. Explicitly selecting a new connection or “Not connected” replaces the previous connection to that destination.
+- Channel-count/rate changes are rejected while the virtual device is in use. Stop routing and disable the DAW audio engine first.
+- The engine uses a private Aggregate Device. The app does not modify the user's existing Aggregate Device or default devices.
+- Follow clock master monitors the master's rate and automatically synchronizes other selected physical interfaces when they differ, even without the virtual driver installed. The master is never changed. A failed attempt is followed by three immediate retries, then five seconds between attempts. Status appears in the sidebar. Clearing the checkbox stops further attempts; an ongoing driver call may need to finish. Changing the master or selected interfaces starts a new attempt series. Active routing stops before synchronization and does not restart automatically.
+- Missing channels or failed rate synchronization block startup. Device/format changes during operation silence outputs and stop routing at the next status check.
 
-## Arkitektur och latens
+## Architecture and latency
 
 ```text
-UFX / ZED ingångar → privat Core Audio-aggregate → routingmotor
-    → intern dold bryggutgång → capture-tidsbuffert → StudioPatch input → Ableton
+UFX / ZED inputs → private Core Audio aggregate → routing engine
+    → internal hidden bridge output → capture time buffer → StudioPatch input → Ableton
 
-Ableton → StudioPatch output → playback-tidsbuffert
-    → intern dold bryggingång → routingmotor → UFX / ZED uppspelningskanaler
+Ableton → StudioPatch output → playback time buffer
+    → internal hidden bridge input → routing engine → UFX / ZED playback channels
 ```
 
-Drivrutinen är ett AudioServerPlugIn byggt med libASPL. Den dolda bryggan och den synliga enheten delar tidsbas, men capture och playback har separata buffertar. Därför kan kanalantalen skilja sig och uppspelning blandas inte automatiskt in i inspelningen. Ingen fil-, nätverks- eller IPC-ljudtransport används mellan app och drivrutin; Core Audio transporterar ljudet via den interna bryggan.
+The driver is an AudioServerPlugIn built with libASPL. The hidden bridge and visible device share a timebase, but capture and playback have separate buffers. Channel counts can therefore differ, and playback is not automatically mixed into recording. No file, network or IPC audio transport connects the app and driver; Core Audio carries audio through the internal bridge.
 
-Denna prototyp prioriterar korrekt kanalmodell och säkert beteende framför lägsta möjliga latens. Ljudcallbackarna allokerar inte minne och väntar inte på mutexar. Tidsbuffertarna använder atomiska samples och returnerar tystnad vid saknade eller överskrivna frames. Buffertar berörs vid initiering men minnessidor är ännu inte låsta; produktionshärdning återstår.
+This prototype prioritizes a correct channel model and safe behavior over minimum latency. Audio callbacks do not allocate memory or wait on mutexes. Time buffers use atomic samples and return silence for missing or overwritten frames. Buffers are touched during initialization, but memory pages are not yet locked; production hardening remains.
 
-Transportmarginalen är automatisk som standard och följer vald I/O-buffert med fyra buffertar **per riktning**. Aktuella samples och millisekunder per riktning visas vid vald samplingsfrekvens. Under **Avancerat** kan automatiken stängas av och marginalen väljas manuellt; det manuella värdet bevaras när automatiken används. Äldre sessioner utan inställningen använder automatiken. Standard är 96 kHz, 64 samples I/O och därmed 256 samples marginal, med UFX III förvald som master när kortet finns. Vid 96 kHz motsvarar transportmarginalerna tillsammans 5,33 ms, **utöver** andra delar av signalvägen. Det är en beräkning av den valda marginalen, inte uppmätt tur-och-returlatens. UI tillåter lägre marginaler; start kräver minst två faktiska I/O-buffertar per riktning. Exempel: 32 samples I/O och 64 samples marginal ger 1,33 ms beräknad sammanlagd transportmarginal vid 96 kHz. Stabiliteten i det läget är inte verifierad.
+The transport margin is automatic by default, following the selected I/O buffer with four buffers **per direction**. Current samples and milliseconds per direction are shown at the selected sample rate. Under **Advanced**, automatic mode can be disabled and the margin chosen manually; the manual value is preserved while automatic mode is active. Older sessions without this setting use automatic mode. Defaults are 96 kHz, 64 I/O samples and thus a 256-sample margin, with UFX III preselected as master when present. At 96 kHz, the combined transport margins are 5.33 ms, **in addition to** other signal-path stages. This is a calculation of the selected margin, not measured round-trip latency. The UI allows smaller margins; startup requires at least two actual I/O buffers per direction. For example, 32 I/O samples and a 64-sample margin give a calculated combined transport margin of 1.33 ms at 96 kHz. Stability in this mode is unverified.
 
-UFX och ZED kan använda gemensam ADAT-klocka med driftkompensation av på de fysiska korten. Den virtuella bryggan använder i denna version datorns tidsbas och har Core Audios driftkompensation på. **Prototypen är därför inte garanterat bittransparent och är inte en drivrutin direkt klockad av UFX.** En senare optimering kan knyta den virtuella klockan till hårdvarans tidsstämplar; det behöver implementeras och mätas separat.
+UFX and ZED can share an ADAT clock with drift compensation disabled on physical interfaces. In this version, the virtual bridge uses the computer's timebase with Core Audio drift compensation enabled. **The prototype is therefore not guaranteed to be bit-transparent and is not a driver clocked directly by UFX.** A later optimization could tie the virtual clock to hardware timestamps; this requires separate implementation and measurement.
 
-Drivrutinen rapporterar sin egen transportmarginal, men förmedlar ännu inte all bakomliggande hårdvaru-/aggregate-latens till DAW:n. Automatisk inspelningskompensation kan därför bli fel. Använd den inte för tidskritiska inspelningar förrän en fysisk loopbackmätning och kontroll av inspelningsoffset har gjorts.
+The driver reports its own transport margin but does not yet forward all underlying hardware/aggregate latency to the DAW. Automatic recording compensation may therefore be incorrect. Do not use it for timing-critical recordings before physical loopback measurement and recording-offset verification.
 
-## Bygg och öppna
+## Build and open
 
-Kräver Xcode/Command Line Tools, CMake och macOS 14 eller senare. Det medföljande bygget är för Apple Silicon på denna Mac.
+Requires Xcode/Command Line Tools, CMake and macOS 14 or later. The included build targets Apple Silicon on this Mac.
 
 ```sh
 ./Scripts/build.sh
 open Dist/StudioPatch.app
 ```
 
-Bygget skapar app, `.driver` och det skrivskyddade verktyget `patch-inspect` i `Dist`. Det installerar ingenting. Utan drivrutin går det att inventera ljudkort, redigera matriser och spara presets; knappar för ljudstart är avstängda.
+The build creates the app, `.driver` and read-only `patch-inspect` tool in `Dist`. It installs nothing. Without the driver, interfaces can be inventoried, matrices edited and presets saved; audio-start controls are disabled.
 
-Bygget använder lokal ad hoc-signering om `STUDIOPATCH_SIGNING_IDENTITY` inte är satt. Det är inte notariserat. Att signaturkontrollen passerar bevisar inte att Core Audio laddar drivrutinen. Ändra inte SIP eller macOS säkerhetsinställningar för att kringgå ett eventuellt laddningsfel; undersök i stället loggar och signering.
+The build uses local ad hoc signing if `STUDIOPATCH_SIGNING_IDENTITY` is unset. It is not notarized. Passing signature checks does not prove that Core Audio loads the driver. Do not change SIP or macOS security settings to bypass loading errors; investigate logs and signing instead.
 
-## Installation och första hårdvarutest — ännu inte utfört
+## Installation and first hardware test — not yet performed
 
-1. Stäng ljudprogram och spara pågående arbete.
-2. Granska `Scripts/install-driver.sh`. Det installerar endast `StudioPatch.driver` i `/Library/Audio/Plug-Ins/HAL` och vägrar skriva över en befintlig installation. För uppdatering: använd `sudo ./Scripts/install-driver.sh --replace`; den gamla StudioPatch-drivrutinen sparas då under `/Library/Audio/StudioPatch Backups` före ersättning. Starta om datorn efter uppdateringen.
-3. Kör `sudo ./Scripts/install-driver.sh` och starta därefter om datorn. Skriptet startar inte om ljudservern automatiskt.
-4. Kontrollera att **StudioPatch** syns i Ljud-/MIDI-inställningar. Öppna appen. Bekräfta att båda fysiska korten visar rätt frekvens och att ADAT verkligen är låst/synkroniserad. Appen kan inte verifiera ADAT-låsningen åt dig.
-5. Ange önskat antal in/ut och frekvens. Klicka **Tillämpa kanalantal** medan DAW-ljudmotorn är av. Välj sedan StudioPatch som både in- och utenhet i Ableton. Vid kanaländring kan Abletons Input/Output Config behöva uppdateras.
-6. Välj båda korten, rätt klockmaster och dina rutter. Låt driftkompensation vara av på ADAT-synkade kort. Med **Följ klockmaster** läses masterns frekvens och övriga valda kort ställs till samma frekvens. Appen kontrollerar först stöd, skrivbehörighet och om kortet används av ett annat program. Ett asynkront byte måste bekräftas inom två sekunder per kort. Det finns ingen manuell synkknapp; avvikelser upptäcks vid inventeringen varannan sekund och synkningen körs i bakgrunden. Kontrollera kanalvalen efter bytet: vissa kanaler kan försvinna vid högre frekvens. Vid delvis misslyckat byte kan något kort redan ha bytt frekvens; detta visas som ett fel och ingen automatisk återställning görs. Klockkällan och ADAT-låsningen ändras inte av appen.
-7. Börja med en enda signal på låg nivå och större transportmarginal. Ge mikrofonbehörighet om macOS frågar. Klicka **Starta routing**. Ingen startsignal genereras av appen.
-8. Testa inspelning och uppspelning var för sig, därefter samtidigt. Kontrollera att uppspelning inte hörs på inspelningskanalerna utan avsiktlig extern routing.
-9. Mät en fysisk ut→in-loopback både med direkt RME och StudioPatch, vid samma frekvens och buffert. Skillnaden är det relevanta måttet på extra latens. Kontrollera även DAW:ns inspelningsoffset.
-10. Minska marginal och buffert stegvis; kör sedan minst 30 minuter, kontrollera glitchar, frånkoppling, stopp/start och återöppning av Ableton.
+1. Close audio applications and save ongoing work.
+2. Review `Scripts/install-driver.sh`. It installs only `StudioPatch.driver` in `/Library/Audio/Plug-Ins/HAL` and refuses to overwrite an existing installation. To update, use `sudo ./Scripts/install-driver.sh --replace`; the previous StudioPatch driver is saved under `/Library/Audio/StudioPatch Backups` before replacement. Restart the computer after updating.
+3. Run `sudo ./Scripts/install-driver.sh`, then restart the computer. The script does not restart the audio server automatically.
+4. Verify that **StudioPatch** appears in Audio MIDI Setup. Open the app. Confirm that both physical interfaces show the correct rate and that ADAT is actually locked/synchronized. The app cannot verify ADAT lock for you.
+5. Set the desired input/output counts and rate. Click **Apply channel counts** while the DAW audio engine is off. Then select StudioPatch as both input and output in Ableton. Channel changes may require updating Ableton's Input/Output Config.
+6. Select both interfaces, the correct clock master and your routes. Leave drift compensation off on ADAT-synchronized interfaces. **Follow clock master** reads the master's rate and sets other selected interfaces to match. The app first checks support, writability and whether another application is using the interface. An asynchronous change must be confirmed within two seconds per interface. There is no manual sync button; mismatches are detected by the inventory every two seconds and synchronized in the background. Check channel selections afterward: some channels may disappear at higher rates. If a change partially fails, some interfaces may already have switched; an error is shown and there is no automatic rollback. The app does not change clock sources or ADAT lock.
+7. Start with one low-level signal and a larger transport margin. Grant microphone access if macOS asks. Click **Start routing**. The app generates no startup signal.
+8. Test recording and playback separately, then together. Verify that playback is not heard on recording channels without intentional external routing.
+9. Measure a physical output→input loopback with both direct RME and StudioPatch at identical rates and buffers. The difference measures added latency. Also check the DAW recording offset.
+10. Reduce margin and buffer gradually; then run for at least 30 minutes, checking glitches, disconnection, stop/start and reopening Ableton.
 
-UFX-utgångar i appen är dess **software playback-kanaler**. Hur de når fysiska uttag styrs fortfarande av TotalMix. ZED:s returval styrs också av mixerns egna inställningar.
+UFX outputs in the app are its **software playback channels**. TotalMix still determines how they reach physical outputs. ZED return selections are also controlled by the mixer's own settings.
 
-Avinstallation: stäng ljudprogram, kör `sudo ./Scripts/uninstall-driver.sh`, starta om datorn. Skriptet tar bara bort en bundle vars identifierare är `se.studiopatch.driver`.
+To uninstall, close audio applications, run `sudo ./Scripts/uninstall-driver.sh` and restart. The script removes only a bundle with identifier `se.studiopatch.driver`.
 
-## Tester och kvarvarande arbete
+## Tests and remaining work
 
-`core-tests` täcker asymmetriskt kanalantal, formatvalidering, duplex-isolering, exakt tidsbuffertförskjutning, tystnad vid saknade/stale frames, gemensam virtuell tidsbas, aktiv klient vid omkonfiguration och samtidig läsning/skrivning över buffertomslag.
+`core-tests` covers asymmetric channel counts, format validation, duplex isolation, exact time-buffer offsets, silence for missing/stale frames, a shared virtual timebase, an active client during reconfiguration and concurrent reads/writes across buffer wraparound.
 
-`route-tests` använder den riktiga motorcallbacken med syntetiska UFX-, ZED- och bryggbuffertar för att kontrollera omordning, båda riktningar, tysta oanvända utgångar och att ändrad layout tystas.
+`route-tests` uses the actual engine callback with synthetic UFX, ZED and bridge buffers to check reordering, both directions, silent unused outputs and silence after layout changes.
 
-`rate-tests` täcker att mastern aldrig skrivs, fördröjd bekräftelse, redan synkade kort, avvisning av upptagna/skrivskyddade/inkompatibla kort, timeout och ändrad master under synkning. Tester använder simulerade drivrutinsanrop. Verkliga frekvensbyten på UFX/ZED är ännu inte testade. Ändring under pågående ljud stoppar fortfarande routingen; automatisk synkning försöker därefter följa mastern.
+`rate-tests` covers never writing to the master, delayed confirmation, already synchronized interfaces, rejection of busy/read-only/incompatible interfaces, timeouts and master changes during synchronization. Tests use simulated driver calls. Actual UFX/ZED rate changes have not yet been tested. Changes during audio still stop routing; automatic synchronization then attempts to follow the master.
 
-`preset-tests` testar appens faktiska Swift-modell: minskning av in/ut oberoende av varandra, sparning/öppning med vilande kopplingar, återökning, noll kanaler i ena riktningen, uttrycklig bortkoppling och äldre preset-format. Motorns JSON får endast aktiva kopplingar. `route-tests` kontrollerar dessutom att borttagna aktiva rutter tystas utan kvarvarande samples och kan återaktiveras i båda riktningar.
+`preset-tests` exercises the app's actual Swift model: independent input/output reductions, saving/opening dormant connections, restoring counts, zero channels in one direction, explicit disconnection and older preset formats. Engine JSON receives only active connections. `route-tests` also checks that removed active routes are silenced without residual samples and can be reactivated in both directions.
 
-Kvar före skarp användning: verklig HAL-laddning/omkonfiguration, signerad distribution, mikrofonbehörighet, verifiering av privat aggregate med den dolda bryggan, enhetsbyte och viloläge, långtidstest, mätning av RTL/DAW-kompensation och prestanda vid många kanaler. Appen måste vara öppen under routing. Routing kan ändras efter stopp; ändring under pågående ljud är inte implementerad.
+Remaining before production use: actual HAL loading/reconfiguration, signed distribution, microphone permission, verification of the private aggregate with the hidden bridge, device changes and sleep, extended testing, RTL/DAW compensation measurement and high-channel-count performance. The app must remain open during routing. Routing can be changed after stopping; changes during audio are not implemented.
 
-## Källor och licenser
+## Sources and licenses
 
-- libASPL är versionslåst till `633e0f70203edd87d320fc5a3cae901e1363aac5` och levereras oförändrat i `Vendor/libASPL`. Bibliotekets MIT- och Apple-licenser finns där.
+- libASPL is pinned to `633e0f70203edd87d320fc5a3cae901e1363aac5` and included unchanged in `Vendor/libASPL`. Its MIT and Apple licenses are stored there.
 - [libASPL](https://github.com/gavv/libASPL)
 - [Apple: Creating an Audio Server Driver Plug-in](https://developer.apple.com/documentation/coreaudio/creating-an-audio-server-driver-plug-in)
-- Aggregate-egenskaper och kanalordning följer dokumentationen i Xcodes `CoreAudio/AudioHardware.h`.
+- Aggregate properties and channel order follow the documentation in Xcode's `CoreAudio/AudioHardware.h`.
 
-Den medföljande källkoden är lokal och installerar inga tjänster eller schemalagda uppgifter.
+The included source code is local and installs no services or scheduled tasks.
 
-## Testversion med bakgrundsmotor
+## Background-engine test version
 
-Stäng den äldre StudioPatch-appen och ljudprogrammen före uppdateringen. Installera den nya drivrutinen med `sudo Scripts/install-driver.sh --replace`. Kör därefter `Scripts/install-service.sh` som din vanliga användare, utan sudo. Starta om datorn. Tjänsten startar vid inloggning med sparad konfiguration; appen kan öppnas och stängas som kontrollpanel.
+Close the older StudioPatch app and audio applications before updating. Install the new driver with `sudo Scripts/install-driver.sh --replace`. Then run `Scripts/install-service.sh` as your regular user, without sudo. Restart the computer. The service starts at login with the saved configuration; the app can be opened and closed as a control panel.
 
-Routing och kanalantal tillämpas automatiskt, med ett möjligt kort ljudavbrott. Frekvenser som StudioPatch exponerar hämtas från klockmastern (inom 8–384 kHz). Ändra frekvens i Ableton för att begära byte på de valda korten. Vid avslag eller timeout blir transporten tyst och felet visas i panelen; tillåt systemnotiser om du också vill få dem. Faktisk kompatibilitet med klienters formatbyten måste verifieras med den installerade testdrivrutinen.
+Routing and channel counts are applied automatically, possibly causing a brief audio interruption. Rates exposed by StudioPatch come from the clock master (within 8–384 kHz). Change the rate in Ableton to request a change on the selected interfaces. Rejection or timeout silences transport and displays the error in the panel; allow system notifications if desired. Actual compatibility with client format changes must be verified with the installed test driver.
 
-Bakgrundstjänsten kan avregistreras med `launchctl bootout gui/$(id -u) "$HOME/Library/LaunchAgents/se.studiopatch.runtime.plist"`. Ta därefter bort just den plist-filen för att stänga av start vid inloggning. Appen startar tjänsten igen när den öppnas.
+Unregister the background service with `launchctl bootout gui/$(id -u) "$HOME/Library/LaunchAgents/se.studiopatch.runtime.plist"`. Then remove that specific plist file to disable login startup. Opening the app starts the service again.
 
-### Lokal signering
+### Local signing
 
-Bygget använder certifikatfingeravtrycket i `Scripts/signing-identity.txt` och kräver att dess privata nyckel finns i användarens nyckelring. På en annan utvecklingsdator anger du `STUDIOPATCH_SIGNING_IDENTITY` eller uppdaterar fingeravtrycket. Ingen privat nyckel ingår i projektet. Appen och den inbäddade motorn använder samma certifikat och signeringsidentifierare (`se.studiopatch.app`) för gemensam behörighetsidentitet. Bygget faller inte automatiskt tillbaka till ad hoc-signering. Första övergången från äldre lokala byggen kan kräva ett nytt godkännande för ljudåtkomst.
+The build uses the certificate fingerprint in `Scripts/signing-identity.txt` and requires its private key in the user's Keychain. On another development computer, set `STUDIOPATCH_SIGNING_IDENTITY` or update the fingerprint. No private key is included in the project. The app and embedded engine use the same certificate and signing identifier (`se.studiopatch.app`) for a shared permission identity. The build does not automatically fall back to ad hoc signing. The first transition from older local builds may require renewed audio-access consent.

@@ -18,16 +18,16 @@ import AppKit
         app.preset.masterUID = "ufx"
         app.preset.devices = [Member(uid:"ufx",drift:false),Member(uid:"zed",drift:false)]
         let labelledPort = Port(deviceUID:"ufx",channel:9)
-        app.preset.setLabel("Sångmikrofon",for:labelledPort,direction:.input)
-        app.preset.setLabel("Monitor vänster",for:labelledPort,direction:.output)
+        app.preset.setLabel("Vocal microphone",for:labelledPort,direction:.input)
+        app.preset.setLabel("Monitor left",for:labelledPort,direction:.output)
         app.preset.setLabel("Synth",for:Port(deviceUID:"zed",channel:9),direction:.input)
         // No save action or quit hook: a fresh Model reads every previous edit.
         let reopened = Model(store:SessionStore(url:url),discoverDevices:false)
         precondition(reopened.preset.inputCount == 2 && reopened.preset.outputCount == 1)
         precondition(reopened.preset.dormantRouteCount == 2)
         precondition(reopened.preset.masterUID == "ufx" && reopened.preset.devices.count == 2)
-        precondition(reopened.preset.label(for:labelledPort,direction:.input) == "Sångmikrofon")
-        precondition(reopened.preset.label(for:labelledPort,direction:.output) == "Monitor vänster")
+        precondition(reopened.preset.label(for:labelledPort,direction:.input) == "Vocal microphone")
+        precondition(reopened.preset.label(for:labelledPort,direction:.output) == "Monitor left")
         reopened.devices = [Device(id:123,uid:"ufx",name:"Fireface UFX III",inputs:9,outputs:9,sampleRate:96000,aggregate:false,
             inputNames:(1...9).map { "Analog \($0)" },outputNames:(1...9).map { "Analog \($0)" })]
         reopened.openLabels(port:labelledPort,direction:1)
@@ -99,26 +99,26 @@ import AppKit
         computer.devices = reopened.devices
         computer.preset.devices = reopened.preset.devices
         computer.preset.inputs[0] = labelledPort
-        computer.preset.setLabel("Sång",for:labelledPort,direction:.input)
+        computer.preset.setLabel("Vocal",for:labelledPort,direction:.input)
         computer.preset.outputs = [Playback(deviceUID:"ufx",channel:8,virtualChannel:1),Playback(deviceUID:"ufx",channel:9,virtualChannel:1)]
         computer.preset.setLabel("Monitor L",for:Port(deviceUID:"ufx",channel:8),direction:.output)
         computer.preset.setLabel("Monitor R",for:labelledPort,direction:.output)
-        precondition(computer.computerName(1,input:true,multiline:true) == "To Computer 1\nSång")
+        precondition(computer.computerName(1,input:true,multiline:true) == "To Computer 1\nVocal")
         precondition(computer.computerName(1,input:false,multiline:true) == "From Computer 1\nMonitor L · Monitor R")
         precondition(computer.computerName(2,input:true) == "To Computer 2")
-        precondition(computer.exposedChannelName(1,input:true) == "Sång")
+        precondition(computer.exposedChannelName(1,input:true) == "Vocal")
         precondition(computer.exposedChannelName(1,input:false) == "Monitor L · Monitor R")
         precondition(computer.exposedChannelName(2,input:true) == "To Computer 2")
         let names=try JSONSerialization.jsonObject(with:Data(computer.channelNamesPayload().utf8)) as! [String:[String]]
         precondition(names["inputs"]?.count == 18 && names["outputs"]?.count == 18)
-        precondition(names["inputs"]?[0] == "Sång" && names["outputs"]?[0] == "Monitor L · Monitor R")
+        precondition(names["inputs"]?[0] == "Vocal" && names["outputs"]?[0] == "Monitor L · Monitor R")
 
         // Legacy computer labels are ignored, and new ones cannot be set.
         let virtualPort=Port(deviceUID:Preset.virtualUID,channel:1)
         computer.preset.channelLabels?.append(ChannelLabel(port:virtualPort,direction:.input,text:"Old computer label"))
         computer.preset.setLabel("New computer label",for:virtualPort,direction:.input)
         precondition(computer.preset.label(for:virtualPort,direction:.input).isEmpty)
-        precondition(computer.computerName(1,input:true) == "To Computer 1 — Sång")
+        precondition(computer.computerName(1,input:true) == "To Computer 1 — Vocal")
         computer.openComputerLabels(1,input:true)
         precondition(computer.labelSelection == labelledPort && computer.labelDirection == 0)
         precondition(computer.labelEntries.allSatisfy { $0.port.deviceUID != Preset.virtualUID })
@@ -130,9 +130,9 @@ import AppKit
         computer.preset.inputCount=0; computer.preset.outputCount=0
         precondition(computer.computerPorts(1,input:true).isEmpty && computer.computerPorts(1,input:false).isEmpty)
         computer.preset.inputCount=18; computer.preset.outputCount=18
-        precondition(computer.computerName(1,input:true) == "To Computer 1 — Sång")
-        computer.preset.setLabel("Ny sång",for:labelledPort,direction:.input)
-        precondition(computer.computerName(1,input:true) == "To Computer 1 — Ny sång")
+        precondition(computer.computerName(1,input:true) == "To Computer 1 — Vocal")
+        computer.preset.setLabel("New vocal",for:labelledPort,direction:.input)
+        precondition(computer.computerName(1,input:true) == "To Computer 1 — New vocal")
         computer.preset.setLabel("",for:labelledPort,direction:.input)
         precondition(computer.computerName(1,input:true) == "To Computer 1 — UFX III · Analog 9")
         computer.preset.inputs[0]=nil; computer.preset.outputs=[]
@@ -140,12 +140,12 @@ import AppKit
         precondition(computer.computerName(1,input:false) == "From Computer 1")
         precondition(reopened.preset.label(for:Port(deviceUID:"zed",channel:9),direction:.input) == "Synth")
         let exported = try JSONDecoder().decode(Preset.self,from:Data(reopened.preset.encoded().utf8))
-        precondition(exported.label(for:labelledPort,direction:.input) == "Sångmikrofon")
-        precondition(reopened.inputPorts[8].1 == "UFX III · Analog 9 — Sångmikrofon")
-        precondition(reopened.outputPorts[8].1 == "UFX III · Analog 9 — Monitor vänster")
+        precondition(exported.label(for:labelledPort,direction:.input) == "Vocal microphone")
+        precondition(reopened.inputPorts[8].1 == "UFX III · Analog 9 — Vocal microphone")
+        precondition(reopened.outputPorts[8].1 == "UFX III · Analog 9 — Monitor left")
         reopened.preset.setLabel("",for:labelledPort,direction:.input)
         precondition(reopened.inputPorts[8].1 == "UFX III · Analog 9")
-        precondition(reopened.preset.label(for:labelledPort,direction:.output) == "Monitor vänster")
+        precondition(reopened.preset.label(for:labelledPort,direction:.output) == "Monitor left")
         reopened.preset.inputCount = 37; reopened.preset.outputCount = 21
         precondition(reopened.preset.activeInputs[36] == Port(deviceUID:"ufx",channel:9))
         precondition(reopened.preset.activeOutputs[0].virtualChannel == 21)
