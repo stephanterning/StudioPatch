@@ -31,25 +31,22 @@ import Foundation
         precondition(sync.isSyncLocked("a") && !sync.isSyncLocked("b"))
 
         var margin = Preset()
-        precondition(margin.usesAutomaticTransportMargin && margin.effectiveDelayFrames == 256)
         margin.delayFrames = 512
         margin.bufferFrames = 128
         let largerPayload = try decode(margin.encoded(forEngine:true))
-        precondition(largerPayload.delayFrames == 512)
+        precondition(largerPayload.delayFrames == 256)
         margin.bufferFrames = 32
         let automaticPayload = try decode(margin.encoded(forEngine:true))
-        precondition(automaticPayload.delayFrames == 128)
-        precondition(abs(margin.transportMarginMilliseconds - 4.0/3.0) < 0.000001)
+        precondition(automaticPayload.delayFrames == 256)
         margin.sampleRate = 48000
-        precondition(abs(margin.transportMarginMilliseconds - 8.0/3.0) < 0.000001)
         margin.automaticTransportMargin = false
         let manualPayload = try decode(margin.encoded(forEngine:true))
-        precondition(manualPayload.delayFrames == 512)
+        precondition(manualPayload.delayFrames == 256 && manualPayload.automaticTransportMargin == nil)
         margin = try decode(margin.encoded())
-        precondition(!margin.usesAutomaticTransportMargin && margin.delayFrames == 512)
+        precondition(margin.automaticTransportMargin == false && margin.delayFrames == 512)
         margin.automaticTransportMargin = true
         let restoredAuto = try decode(margin.encoded())
-        precondition(restoredAuto.effectiveDelayFrames == 128 && restoredAuto.delayFrames == 512)
+        precondition(restoredAuto.automaticTransportMargin == true && restoredAuto.delayFrames == 512)
 
         var p = Preset()
         p.inputCount = 37; p.outputCount = 21; p.resizeChannels()
@@ -106,7 +103,7 @@ import Foundation
         try old.validate()
         precondition(old.followMaster == nil && old.inputs.count == 18)
         precondition(old.channelLabels == nil)
-        precondition(old.usesAutomaticTransportMargin && old.effectiveDelayFrames == 256)
+        precondition(old.automaticTransportMargin == nil)
         // One source may feed several destinations in either direction.
         var fanout = Preset()
         fanout.inputs[0] = Port(deviceUID:"ufx",channel:9)

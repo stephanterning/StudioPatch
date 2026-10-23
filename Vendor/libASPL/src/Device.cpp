@@ -1071,7 +1071,7 @@ std::shared_ptr<Client> Device::GetClientByID(UInt32 clientID) const
 
 OSStatus Device::StartIO(AudioObjectID objectID, UInt32 clientID)
 {
-    std::lock_guard ioLock(ioMutex_);
+    std::lock_guard ioLock(params_.IndependentIOLifecycle ? lifecycleMutex_ : ioMutex_);
 
     Tracer::Operation op;
     op.Name = "Device::StartIO()";
@@ -1132,7 +1132,7 @@ end:
 
 OSStatus Device::StopIO(AudioObjectID objectID, UInt32 clientID)
 {
-    std::lock_guard ioLock(ioMutex_);
+    std::lock_guard ioLock(params_.IndependentIOLifecycle ? lifecycleMutex_ : ioMutex_);
 
     Tracer::Operation op;
     op.Name = "Device::StopIO()";
@@ -1154,6 +1154,7 @@ OSStatus Device::StopIO(AudioObjectID objectID, UInt32 clientID)
         GetContext()->Tracer->Message("stopping io: clientID=%u", unsigned(clientID));
     }
 
+    if(startCount_ <= 0) {status = kAudioHardwareIllegalOperationError;goto end;}
     status = StopIOImpl(clientID, startCount_ - 1);
 
     if (status != kAudioHardwareNoError) {
@@ -1491,6 +1492,7 @@ OSStatus Device::DoIOOperationImpl(AudioObjectID streamID,
     const auto ioChannelCount = stream->GetChannelCount();
 
     const auto ioHandler = GetIOHandler();
+    ioHandler->OnCycleTiming(operationID,*ioCycleInfo);
 
     switch (operationID) {
     case kAudioServerPlugInIOOperationReadInput:

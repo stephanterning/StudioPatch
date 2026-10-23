@@ -2,6 +2,7 @@
 #include "Core.hpp"
 #include "Latency.hpp"
 #include "SharedTransport.hpp"
+#include "RouteSlot.hpp"
 #include "ChannelNames.hpp"
 #include "RateSync.hpp"
 #include "RateWire.hpp"
@@ -20,8 +21,12 @@ AudioObjectPropertyAddress address(AudioObjectPropertySelector selector,
     AudioObjectPropertyScope scope = kAudioObjectPropertyScopeGlobal, UInt32 element = 0) {
     return {selector,scope,element};
 }
+struct HALError : std::runtime_error {
+    OSStatus status;
+    HALError(OSStatus value,const std::string& what):std::runtime_error(what+" (Core Audio "+std::to_string(value)+")"),status(value){}
+};
 void check(OSStatus status, const std::string& what) {
-    if (status) throw std::runtime_error(what + " (Core Audio " + std::to_string(status) + ")");
+    if (status) throw HALError(status,what);
 }
 template<typename T> T get(AudioObjectID id, AudioObjectPropertySelector key,
     AudioObjectPropertyScope scope = kAudioObjectPropertyScopeGlobal) {
@@ -58,15 +63,33 @@ AudioDeviceID translate(NSString* uid) {
     check(AudioObjectGetPropertyData(kAudioObjectSystemObject,&a,sizeof(cf),&cf,&size,&id),"Find device");
     return id;
 }
-AudioObjectID pluginID() {
-    // HAL device ownership is not the plug-in ID (it may be the system object).
+AudioObjectID pluginID(decltype(&AudioObjectGetPropertyData) read=AudioObjectGetPropertyData,
+    decltype(&AudioObjectGetPropertyDataSize) readSize=AudioObjectGetPropertyDataSize) {
     CFStringRef bundle=CFSTR("se.studiopatch.driver");
-    AudioObjectID id=kAudioObjectUnknown; UInt32 size=sizeof(id);
+    AudioObjectID id=0; UInt32 size=sizeof(id);
     auto a=address(kAudioHardwarePropertyTranslateBundleIDToPlugIn);
-    check(AudioObjectGetPropertyData(kAudioObjectSystemObject,&a,sizeof(bundle),&bundle,&size,&id),
-        "Find the StudioPatch driver");
-    if (!id) throw std::runtime_error("The StudioPatch driver is not installed and loaded.");
-    return id;
+    auto status=read(kAudioObjectSystemObject,&a,sizeof(bundle),&bundle,&size,&id);
+    if(!status && id)return id;
+    // A stale unrelated plug-in can make HAL's bundle translation fail.
+    // Query each current plug-in independently; never cache IDs across hotplug.
+    a=address(kAudioHardwarePropertyPlugInList);size=0;
+    auto listStatus=readSize(kAudioObjectSystemObject,&a,0,nullptr,&size);
+    if(!listStatus && size && size<=4096*sizeof(AudioObjectID) && size%sizeof(AudioObjectID)==0) {
+        std::vector<AudioObjectID> ids(size/sizeof(AudioObjectID));auto capacity=size;
+        listStatus=read(kAudioObjectSystemObject,&a,0,nullptr,&size,ids.data());
+        if(!listStatus && size<=capacity && size%sizeof(AudioObjectID)==0) {
+            for(size_t i=0;i<size/sizeof(AudioObjectID);++i) {
+                auto key=address(kAudioPlugInPropertyBundleID);CFStringRef name=nullptr;UInt32 bytes=sizeof(name);
+                auto err=read(ids[i],&key,0,nullptr,&bytes,&name);
+                bool match=!err && name && CFGetTypeID(name)==CFStringGetTypeID() && CFEqual(name,bundle);
+                if(name)CFRelease(name);
+                if(match)return ids[i];
+            }
+        }
+    }
+    check(status,"Find the StudioPatch driver");
+    check(listStatus,"List audio plug-ins");
+    throw std::runtime_error("The StudioPatch driver is not installed and loaded.");
 }
 NSDictionary* json(const char* raw) {
     if (!raw) throw std::runtime_error("Missing configuration");
@@ -80,7 +103,10 @@ char* response(id obj) {
     NSString* s=[[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
     return strdup(s.UTF8String ?: "{}");
 }
-char* failure(const std::exception& e) { return response(@{@"error":@(e.what())}); }
+char* failure(const std::exception& e) {
+    if(auto hal=dynamic_cast<const HALError*>(&e))return response(@{@"error":@(e.what()),@"coreAudioStatus":@(hal->status)});
+    return response(@{@"error":@(e.what())});
+}
 patch::Config config(NSDictionary* d) {
     auto integer = [&](NSString* key)->std::string {
         id v=d[key];
@@ -89,7 +115,7 @@ patch::Config config(NSDictionary* d) {
         return std::to_string([v longLongValue]);
     };
     return patch::Config::parse("1 "+integer(@"inputCount")+" "+integer(@"outputCount")+" "+
-        integer(@"sampleRate")+" "+integer(@"delayFrames"));
+        integer(@"sampleRate")+" 256");
 }
 std::string currentConfig() {
     auto id=pluginID(); auto a=address(patch::ConfigProperty);
@@ -100,6 +126,23 @@ std::string currentConfig() {
     return text.UTF8String;
 }
 
+// The broker authenticates this console-user process and registers its PID for
+// this generation. All callers run on the serialized service control queue.
+template<class Connect> void refreshControllerClaim(std::shared_ptr<patch::SharedMapping>& claim,
+    uint64_t generation,Connect connect) {
+    if(!claim || claim->data->generation!=generation || claim->data->controllerPID.load()!=getpid())
+        claim=connect();
+}
+void authorizeWrites() {
+    auto text=stringProperty(pluginID(),patch::DirectProperty);
+    auto generation=std::strtoull(text.UTF8String,nullptr,10);
+    if(!generation)throw std::runtime_error("StudioPatch transport is connecting; waiting for broker recovery.");
+    static std::shared_ptr<patch::SharedMapping> claim;
+    refreshControllerClaim(claim,generation,[&]{
+        return patch::SharedMapping::connect(generation,patch::Config::parse(currentConfig()),false);
+    });
+}
+
 struct Channel { uint32_t buffer, channel, stride; };
 std::vector<Channel> channels(const std::vector<UInt32>& l) {
     std::vector<Channel> result;
@@ -107,12 +150,30 @@ std::vector<Channel> channels(const std::vector<UInt32>& l) {
     return result;
 }
 struct Route { Channel source,dest; };
-struct Watch { AudioObjectID id; AudioObjectPropertyAddress addr; };
+struct Watch { AudioObjectID id; AudioObjectPropertyAddress addr; AudioObjectPropertyListenerBlock block; };
+dispatch_queue_t listenerQueue() {
+    static auto queue=dispatch_queue_create("se.studiopatch.device-events",DISPATCH_QUEUE_SERIAL);return queue;
+}
+void addWatch(std::vector<Watch>& watches,AudioObjectID id,AudioObjectPropertyAddress a,
+              std::shared_ptr<std::atomic<bool>> state) {
+    watches.reserve(watches.size()+1);
+    // HAL owns a copy of this block. An in-flight notification owns only its
+    // reference-counted flag, never an engine pointer, even after removal.
+    AudioObjectPropertyListenerBlock block=^(UInt32,const AudioObjectPropertyAddress*){state->store(true);};
+    check(AudioObjectAddPropertyListenerBlock(id,&a,listenerQueue(),block),"Watch device changes");
+    watches.push_back({id,a,block});
+}
+void removeWatches(std::vector<Watch>& watches) {
+    for(auto& w:watches)AudioObjectRemovePropertyListenerBlock(w.id,&w.addr,listenerQueue(),w.block);
+    watches.clear();
+}
+#if defined(STUDIOPATCH_ENABLE_LEGACY)
 class LegacyEngine {
 public:
     AudioDeviceID aggregate=0;
     AudioDeviceIOProcID proc=nullptr;
-    std::atomic<bool> invalidated{false};
+    std::shared_ptr<std::atomic<bool>> invalidation=std::make_shared<std::atomic<bool>>(false);
+    std::atomic<bool>& invalidated=*invalidation;
     std::atomic<uint64_t> cycles{0}, badBuffers{0};
     // Timestamp diagnostics only; never call HAL or allocate in the audio callback.
     std::atomic<int64_t> ioTimestampGap{-1};
@@ -151,19 +212,13 @@ public:
         check(status,"Publish latency report");lastInputLatency=in;lastOutputLatency=out;
     }
     ~LegacyEngine() { stop(); }
-    static OSStatus changed(AudioObjectID,UInt32,const AudioObjectPropertyAddress*,void* p) {
-        static_cast<LegacyEngine*>(p)->invalidated.store(true); return noErr;
-    }
     void watch(AudioObjectID id,AudioObjectPropertySelector key,AudioObjectPropertyScope scope=kAudioObjectPropertyScopeGlobal) {
-        auto a=address(key,scope);
-        check(AudioObjectAddPropertyListener(id,&a,changed,this),"Watch device changes");
-        watches.push_back({id,a});
+        addWatch(watches,id,address(key,scope),invalidation);
     }
     void stop() {
         invalidated.store(true);
         if (proc) { AudioDeviceStop(aggregate,proc); AudioDeviceDestroyIOProcID(aggregate,proc); proc=nullptr; }
-        for (const auto& w:watches) AudioObjectRemovePropertyListener(w.id,&w.addr,changed,this);
-        watches.clear();
+        removeWatches(watches);
         if (aggregate) { AudioHardwareDestroyAggregateDevice(aggregate); aggregate=0; }
     }
     static OSStatus io(AudioDeviceID,const AudioTimeStamp*,const AudioBufferList* input,
@@ -340,26 +395,12 @@ public:
         check(AudioDeviceStart(aggregate,proc),"Start audio; allow microphone access if macOS requests it");
     }
 };
+#endif
 #include "DirectEngine.hpp"
 using Engine=DirectEngine;
 std::mutex control;
 std::unique_ptr<Engine> engine;
-void startLatencyUpdates() {
-    static dispatch_once_t once;
-    dispatch_once(&once,^{
-        // Independent of the two-second UI inventory timer. Property publication
-        // stays off the audio thread and follows slow bridge clock drift.
-        auto queue=dispatch_queue_create("se.studiopatch.latency",DISPATCH_QUEUE_SERIAL);
-        static dispatch_source_t timer;
-        timer=dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER,0,0,queue);
-        dispatch_source_set_timer(timer,dispatch_time(DISPATCH_TIME_NOW,100*NSEC_PER_MSEC),100*NSEC_PER_MSEC,10*NSEC_PER_MSEC);
-        dispatch_source_set_event_handler(timer,^{
-            std::lock_guard lock(control);
-            if(engine)try {engine->publishLatency();}catch(const std::exception&) {}
-        });
-        dispatch_resume(timer);
-    });
-}
+
 }
 
 extern "C" char* SPInventory() { @autoreleasepool {
@@ -401,10 +442,19 @@ extern "C" char* SPInventory() { @autoreleasepool {
         bool installed=false;
         std::string config;
         // Driver health must not gate hardware discovery, especially during hot unplug.
-        try { installed=translate(@(patch::DeviceUID))!=0; } catch(const std::exception&) { }
-        if(installed) { try { config=currentConfig(); } catch(const std::exception&) { } }
+        NSNumber* driverError=nil;
+        try { installed=translate(@(patch::DeviceUID))!=0; }
+        catch(const HALError& e) { driverError=@(e.status); }
+        catch(const std::exception&) { }
+        if(installed) {
+            try { config=currentConfig(); }
+            catch(const HALError& e) { driverError=@(e.status); }
+            catch(const std::exception&) { }
+        }
+        // Preserve hardware discovery, but do not turn a stale HAL object into
+        // a generic "not installed" state that bypasses bounded recovery.
         return response(@{@"devices":devices,@"driverInstalled":@(installed),
-            @"driverConfig":@(config.c_str())});
+            @"driverErrorStatus":driverError ?: (id)[NSNull null],@"driverConfig":@(config.c_str())});
     } catch(const std::exception& e) { return failure(e); }
 } }
 extern "C" char* SPFollowMaster(const char* raw) { @autoreleasepool {
@@ -420,7 +470,7 @@ extern "C" char* SPFollowMaster(const char* raw) { @autoreleasepool {
         auto master=translate(uid);
         if(!master) throw std::runtime_error("Sync source is missing.");
         const double target=get<Float64>(master,kAudioDevicePropertyNominalSampleRate);
-        if(target!=44100 && target!=48000 && target!=88200 && target!=96000)
+        if(!patch::supportedSampleRate(target))
             throw std::runtime_error("The virtual device does not support the sync source's sample rate.");
         std::vector<patch::RateDevice> devices;
         std::set<AudioDeviceID> seen;
@@ -480,6 +530,7 @@ extern "C" char* SPSetChannelNames(const char* raw) { @autoreleasepool {
             }
         }
         auto encoded=names.encode();
+        authorizeWrites();
         const auto c=patch::Config::parse(currentConfig());
         // Width edits are pending until Apply; never assign them to the old layout.
         if (names.inputs.size()!=c.inputs || names.outputs.size()!=c.outputs)
@@ -498,6 +549,7 @@ extern "C" char* SPConfigure(const char* raw) { @autoreleasepool {
     try {
         if(engine) throw std::runtime_error("Stop routing before changing channel counts.");
         auto c=config(json(raw));
+        authorizeWrites();
         auto id=pluginID(); auto a=address(patch::ConfigProperty);
         CFStringRef value=CFStringCreateWithCString(nullptr,c.encode().c_str(),kCFStringEncodingUTF8);
         auto result=AudioObjectSetPropertyData(id,&a,0,nullptr,sizeof(value),&value);
@@ -511,15 +563,20 @@ extern "C" char* SPConfigure(const char* raw) { @autoreleasepool {
         };
         for(int i=0;i<200 && (currentConfig()!=c.encode() || !ready());++i) std::this_thread::sleep_for(std::chrono::milliseconds(25));
         if(currentConfig()!=c.encode() || !ready()) throw std::runtime_error("Core Audio did not confirm the new configuration within five seconds. Audio is muted.");
+        authorizeWrites();
         return response(@{@"ok":@YES});
     } catch(const std::exception& e) { return failure(e); }
+} }
+extern "C" char* SPUpdateRouting(const char* raw) { @autoreleasepool {
+    std::lock_guard lock(control);
+    try{return response(@{@"applied":@(engine && !engine->invalidated && engine->updateRouting(json(raw)))});}
+    catch(const std::exception& e){return failure(e);}
 } }
 extern "C" char* SPStart(const char* raw) { @autoreleasepool {
     std::lock_guard lock(control);
     try {
         if(engine) throw std::runtime_error("Routing is already active");
         auto next=std::make_unique<Engine>(); next->start(json(raw)); engine=std::move(next);
-        startLatencyUpdates();
         return response(@{@"ok":@YES});
     } catch(const std::exception& e) { return failure(e); }
 } }
@@ -527,8 +584,32 @@ extern "C" char* SPStatus() { @autoreleasepool {
     std::lock_guard lock(control);
     NSString* diagnostics=@"unavailable";
     if(engine)try {
-        engine->publishLatency();auto& state=*engine->memory->data;
-        auto values=@{@"transport":@"direct shared memory",@"bufferFrames":@(engine->actualBuffer),
+        auto& state=*engine->memory->data;
+        auto phase=[](const patch::PhaseMeter& p)->NSDictionary* {
+            NSMutableArray* bins=[NSMutableArray array];for(auto& b:p.histogram)[bins addObject:@(b.load())];
+            return @{@"mode":@"projected containing hardware cycle",@"exactPairs":@(p.exactPairs.load()),@"maximumProjectionFrames":@(p.maximumProjectionFrames.load()),@"pairs":@(p.pairs.load()),@"serviceRecords":@(p.service.count.load()),@"clientRecords":@(p.client.count.load()),
+                @"minimumTicks":@(p.minimumTicks.load()),@"maximumTicks":@(p.maximumTicks.load()),@"histogram":bins};
+        };
+        auto histogram=[](const patch::MarginStats& stats)->NSArray* {
+            NSMutableArray* result=[NSMutableArray array];for(auto& bucket:stats.histogram)[result addObject:@(bucket.load())];return result;
+        };
+        auto observation=[](const patch::CycleObservation& c)->NSDictionary* {
+            uint64_t entry=0,host=0;double sample=0;bool valid=c.snapshot(entry,host,sample);
+            return @{@"valid":@(valid),@"entryHost":@(entry),@"cycleHost":@(host),@"sample":@(sample)};
+        };
+        NSMutableArray* deviceTiming=[NSMutableArray array];uint32_t masterIn=0,masterOut=0;
+        for(auto& d:engine->devices)if(d->master){masterIn=d->physicalInputLatency;masterOut=d->physicalOutputLatency;}
+        for(auto& d:engine->devices)[deviceTiming addObject:@{@"deviceID":@(d->physical),@"master":@(d->master),
+            @"clockSkewFrames":@(d->clockSkew.load()),@"mutedClockFault":@(d->clockFault.load()),
+            @"peakClockSkewFrames":@(d->peakClockSkew.load()),@"faultClockSkewFrames":@(d->faultClockSkew.load()),
+            @"inputSkewFrames":@(int64_t(d->physicalInputLatency)+d->extraInput-masterIn),
+            @"outputSkewFrames":@(int64_t(d->physicalOutputLatency)+d->extraOutput-masterOut)}];
+        auto values=@{@"devices":deviceTiming,@"transport":@"direct shared memory",@"timingEnabled":@(state.timingEnabled),@"routingUpdates":@(engine->routingUpdates.load()),@"generation":@(engine->generation),@"rate":@(state.rate),@"readPhase":phase(state.readPhase),@"writePhase":phase(state.writePhase),
+            @"captureMarginHistogram":histogram(state.captureMargin),@"playbackMarginHistogram":histogram(state.playbackMargin),
+            @"captureMarginReads":@(state.captureMargin.reads.load()),@"playbackMarginReads":@(state.playbackMargin.reads.load()),
+            @"captureMarginMinTicks":@(state.captureMargin.minimumTicks.load()),@"playbackMarginMinTicks":@(state.playbackMargin.minimumTicks.load()),
+            @"capturePublicationUnmatched":@(state.captureMargin.unmatched.load()),@"playbackPublicationUnmatched":@(state.playbackMargin.unmatched.load()),
+            @"serviceCycle":observation(state.serviceCycle),@"readCycle":observation(state.readCycle),@"writeCycle":observation(state.writeCycle),@"bufferFrames":@(engine->actualBuffer),
             @"inputPadding":@(state.inputPadding),@"outputPadding":@(state.padding),@"captureMisses":@(state.captureMisses.load()),
             @"playbackMisses":@(state.playbackMisses.load()),@"reportedLatency":stringProperty(pluginID(),patch::LatencyProperty),
             @"inputSafety":@(engine->masterInputSafety),@"outputSafety":@(engine->masterOutputSafety)};
@@ -555,6 +636,9 @@ extern "C" char* SPRuntimeRates(const char* raw) { @autoreleasepool {
         const auto text=patch::encodeRateRanges(publishedRanges);
         auto id=pluginID(); auto a=address(patch::RatesProperty);
         if(!AudioObjectHasProperty(id,&a)) throw std::runtime_error("Core Audio does not expose the driver's sample rate control (sprt). Check the driver version and that it was loaded after restarting.");
+        // The heartbeat must renew a revoked broker claim even when the rate
+        // ranges have not changed. A valid live claim performs no IPC here.
+        authorizeWrites();
         static std::string last;
         if(last!=text) {
             CFStringRef v=CFStringCreateWithCString(nullptr,text.c_str(),kCFStringEncodingUTF8);
@@ -605,6 +689,7 @@ extern "C" char* SPSetHardwareRate(const char* raw) { @autoreleasepool {
 extern "C" char* SPAcknowledgeRate(const char* raw) { @autoreleasepool {
     try {
         std::lock_guard lock(control);
+        authorizeWrites();
         auto a=address(patch::RateRequestProperty);
         auto text=std::to_string([json(raw)[@"ack"] doubleValue]);
         CFStringRef v=CFStringCreateWithCString(nullptr,text.c_str(),kCFStringEncodingUTF8);

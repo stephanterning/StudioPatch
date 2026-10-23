@@ -2,6 +2,8 @@
 
 Date: 2026-10-23. Candidate version: 0.2.0. This supersedes the 0.1.1 hidden-bridge architecture. The user requires at most approximately 1 ms added round trip over the selected Sync Source, accurate input/output reports, and no significant stability regression. Short hardware tests are not a full release qualification.
 
+> Later architecture-review validation changed the default output margin to at least one engine block after detecting short corruption under client load. The figures below record the earlier 0.2.0 measurements; see [review actions](REVIEW-ACTIONS-2026-10-23.md) for the current policy and follow-up evidence.
+
 ## Architecture and reporting
 
 The visible AudioServerPlugIn and background service share tagged atomic sample storage through an authenticated launchd broker. The broker accepts the Apple Core Audio host and the certificate-signed StudioPatch service. All XPC setup is on control threads, with a three-second response timeout; the audio callbacks only access mapped data. Capture and playback are independent. Missing/overwritten samples are zero, and a stale hardware clock mutes the transport. Each service start receives fresh storage and a generation, so an old sample counter cannot revive stale samples.

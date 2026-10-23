@@ -11,6 +11,7 @@ struct RuntimeSnapshot: Codable {
     var message: String
     var rate: Int
     var latencyDiagnostics: String? = nil
+    var recoveryStopped: Bool? = nil
 }
 enum RuntimeConnection {
     static let directory:URL = ProcessInfo.processInfo.environment["STUDIOPATCH_TEST_DIRECTORY"].map { URL(fileURLWithPath:$0) } ?? FileManager.default.urls(for:.applicationSupportDirectory,in:.userDomainMask)[0].appendingPathComponent("StudioPatch")
@@ -71,11 +72,21 @@ enum RuntimeConnection {
     static func launch() throws {
         let agent=FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/LaunchAgents/se.studiopatch.runtime.plist")
         if FileManager.default.fileExists(atPath:agent.path) {
-            let kick=Process(); kick.executableURL=URL(fileURLWithPath:"/bin/launchctl")
-            kick.arguments=["kickstart","gui/\(getuid())/se.studiopatch.runtime"]
-            kick.standardOutput=FileHandle.nullDevice; kick.standardError=FileHandle.nullDevice
-            try kick.run(); kick.waitUntilExit()
-            if kick.terminationStatus == 0 { return }
+            func launchctl(_ arguments:[String]) throws -> Int32 {
+                let task=Process(); task.executableURL=URL(fileURLWithPath:"/bin/launchctl")
+                task.arguments=arguments
+                task.standardOutput=FileHandle.nullDevice; task.standardError=FileHandle.nullDevice
+                try task.run(); task.waitUntilExit(); return task.terminationStatus
+            }
+            let domain="gui/\(getuid())",job="\(domain)/se.studiopatch.runtime"
+            if try launchctl(["kickstart",job]) == 0 { return }
+            // A configured service must stay owned by launchd. Falling back to
+            // Process.run here leaves an orphan that bootout cannot stop and
+            // may run a different app build than the configured service.
+            _ = try launchctl(["bootstrap",domain,agent.path])
+            if try launchctl(["kickstart",job]) == 0 { return }
+            throw NSError(domain:"StudioPatch",code:23,userInfo:[NSLocalizedDescriptionKey:
+                "The registered background service could not start. Reinstall its launch agent from the matching StudioPatch package."])
         }
         let executable=Bundle.main.bundleURL.appendingPathComponent("Contents/MacOS/StudioPatchService")
         let process=Process(); process.executableURL=executable
@@ -84,7 +95,7 @@ enum RuntimeConnection {
     }
     static func read() throws -> RuntimeSnapshot {
         let snapshot=try JSONDecoder().decode(RuntimeSnapshot.self,from:Data(contentsOf:status))
-        guard Date().timeIntervalSince(snapshot.date)<12 else {
+        guard snapshot.recoveryStopped == true || Date().timeIntervalSince(snapshot.date)<12 else {
             throw NSError(domain:"StudioPatch",code:20,userInfo:[NSLocalizedDescriptionKey:"The background engine is not responding. Audio status is unknown."])
         }
         return snapshot

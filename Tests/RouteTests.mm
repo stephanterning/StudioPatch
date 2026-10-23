@@ -1,3 +1,4 @@
+#define STUDIOPATCH_ENABLE_LEGACY 1
 #include "../Sources/Bridge.mm"
 #include <cassert>
 #include <iostream>

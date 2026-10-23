@@ -7,6 +7,7 @@ char* SPFollowMaster(const char* config);
 char* SPSetChannelNames(const char* names);
 char* SPConfigure(const char* config);
 char* SPStart(const char* config);
+char* SPUpdateRouting(const char* config);
 char* SPStatus(void);
 void SPStop(void);
 void SPFree(char* result);

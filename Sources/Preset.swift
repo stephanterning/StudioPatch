@@ -38,9 +38,6 @@ struct Preset: Codable {
     var delayFrames = 256
     // Missing in older sessions means automatic; retain the manual value separately.
     var automaticTransportMargin: Bool? = true
-    var usesAutomaticTransportMargin: Bool { automaticTransportMargin != false }
-    var effectiveDelayFrames: Int { usesAutomaticTransportMargin ? bufferFrames * 4 : delayFrames }
-    var transportMarginMilliseconds: Double { Double(effectiveDelayFrames) * 1000 / Double(sampleRate) }
     var activePresetID: UUID? = nil
     var masterUID = ""
     var devices: [Member] = []
@@ -83,7 +80,8 @@ struct Preset: Codable {
             for index in configuration.devices.indices {
                 configuration.devices[index].syncLocked = isSyncLocked(configuration.devices[index].uid)
             }
-            configuration.delayFrames = effectiveDelayFrames
+            configuration.delayFrames = 256 // Fixed legacy wire placeholder; not a timing policy.
+            configuration.automaticTransportMargin = nil
             configuration.activePresetID = nil
             configuration.deviceDisplayOrder = nil
             configuration.knownDevices = nil
@@ -106,7 +104,7 @@ struct Preset: Codable {
     func validate(forEditing: Bool = false) throws {
         guard (0...128).contains(inputCount), (0...128).contains(outputCount), (forEditing || inputCount + outputCount > 0),
               (8000...384000).contains(sampleRate), [32,64,128,256,512,1024].contains(bufferFrames),
-              (32...4096).contains(delayFrames), inputs.count >= inputCount, inputs.count <= 128,
+              inputs.count >= inputCount, inputs.count <= 128,
               Set(devices.map(\.uid)).count == devices.count,
               outputs.allSatisfy({ $0.channel > 0 && (1...128).contains($0.virtualChannel) }),
               Set(outputs.map { Port(deviceUID:$0.deviceUID,channel:$0.channel) }).count == outputs.count,

@@ -1,130 +1,6 @@
 import SwiftUI
 import CoreAudio
 
-// Core Audio callbacks only enqueue work; device reads stay on AudioWorker.
-// The periodic runtime snapshot remains a fallback if a driver misses a notification.
-final class DeviceInventoryObserver {
-    private struct Watch {
-        var object: AudioObjectID
-        var address: AudioObjectPropertyAddress
-        var block: AudioObjectPropertyListenerBlock
-    }
-    private var watches: [Watch] = []
-    private var deviceIDs = Set<AudioObjectID>()
-    private var pending: DispatchWorkItem?
-    private let changed: () -> Void
-    init(changed: @escaping () -> Void) {
-        self.changed = changed
-        watch(AudioObjectID(kAudioObjectSystemObject), kAudioHardwarePropertyDevices)
-    }
-    private func watch(_ object: AudioObjectID, _ selector: AudioObjectPropertySelector,
-                       scope: AudioObjectPropertyScope = kAudioObjectPropertyScopeGlobal) {
-        var address = AudioObjectPropertyAddress(mSelector:selector,mScope:scope,mElement:kAudioObjectPropertyElementMain)
-        let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
-            guard let self else { return }
-            self.pending?.cancel()
-            let work = DispatchWorkItem { [weak self] in self?.changed() }
-            self.pending = work
-            DispatchQueue.main.asyncAfter(deadline:.now()+0.15,execute:work)
-        }
-        if AudioObjectAddPropertyListenerBlock(object,&address,DispatchQueue.main,block) == noErr {
-            watches.append(Watch(object:object,address:address,block:block))
-        }
-    }
-    func update(_ ids: Set<AudioObjectID>) {
-        guard ids != deviceIDs else { return }
-        for index in watches.indices.reversed() where watches[index].object != AudioObjectID(kAudioObjectSystemObject) && !ids.contains(watches[index].object) {
-            var watch = watches.remove(at:index)
-            AudioObjectRemovePropertyListenerBlock(watch.object,&watch.address,DispatchQueue.main,watch.block)
-        }
-        for id in ids.subtracting(deviceIDs) {
-            watch(id,kAudioObjectPropertyName)
-            watch(id,kAudioDevicePropertyDeviceIsAlive)
-            watch(id,kAudioDevicePropertyNominalSampleRate)
-            for scope in [kAudioObjectPropertyScopeInput,kAudioObjectPropertyScopeOutput] {
-                watch(id,kAudioDevicePropertyStreamConfiguration,scope:scope)
-                watch(id,kAudioObjectPropertyElementName,scope:scope)
-            }
-        }
-        deviceIDs = ids
-    }
-    deinit {
-        pending?.cancel()
-        for var watch in watches {
-            AudioObjectRemovePropertyListenerBlock(watch.object,&watch.address,DispatchQueue.main,watch.block)
-        }
-    }
-}
-
-struct Device: Codable, Identifiable, Equatable {
-    let id: UInt32
-    let uid: String
-    let name: String
-    let inputs: Int
-    let outputs: Int
-    let sampleRate: Double
-    let aggregate: Bool
-    let inputNames: [String]
-    let outputNames: [String]
-    var sampleRates: [Double]? = nil
-    func channelNames(input: Bool) -> [String] {
-        let names=input ? inputNames : outputNames
-        return (0..<(input ? inputs : outputs)).map { index in
-            index < names.count ? names[index] : "\(input ? "Input" : "Output") \(index+1)"
-        }
-    }
-    var snapshot: KnownDevice { KnownDevice(uid:uid,name:name,inputNames:channelNames(input:true),outputNames:channelNames(input:false),sampleRate:sampleRate) }
-    var shortName: String {
-        if name.contains("UFX") { return "UFX III" }
-        if name.contains("ZED") { return "ZED-R16" }
-        return name
-    }
-}
-struct Inventory: Decodable {
-    let devices: [Device]
-    let driverInstalled: Bool
-    let driverConfig: String
-}
-struct LabelEntry: Identifiable {
-    let port: Port
-    let direction: PortDirection
-    let name: String
-    let device: String
-    var id: Port { port }
-}
-struct EngineStatus: Decodable {
-    let running: Bool
-    let invalidated: Bool
-    let cycles: UInt64
-    let badBuffers: UInt64
-    let bufferFrames: Int
-    let latencyDiagnostics: String?
-}
-enum AudioWorker {
-    static let queue=DispatchQueue(label:"se.studiopatch.audio-control",qos:.userInitiated)
-    static func call(_ operation:@escaping ()->UnsafeMutablePointer<CChar>?) async throws -> Data {
-        try await withCheckedThrowingContinuation { continuation in
-            queue.async {
-                guard let pointer=operation() else {
-                    continuation.resume(throwing:NSError(domain:"StudioPatch",code:2)); return
-                }
-                defer { SPFree(pointer) }
-                let raw=Data(String(cString:pointer).utf8)
-                do {
-                    if let obj=try JSONSerialization.jsonObject(with:raw) as? [String:Any], let failure=obj["error"] as? String {
-                        throw NSError(domain:"StudioPatch",code:3,userInfo:[NSLocalizedDescriptionKey:failure])
-                    }
-                    continuation.resume(returning:raw)
-                } catch { continuation.resume(throwing:error) }
-            }
-        }
-    }
-    static func stop() async {
-        await withCheckedContinuation { continuation in
-            queue.async { SPStop(); continuation.resume() }
-        }
-    }
-}
 @MainActor final class Model: ObservableObject {
     @Published var devices: [Device] = []
     @Published var preset = Preset() { didSet { autosave() } }
@@ -134,7 +10,6 @@ enum AudioWorker {
     @Published var ioStatus = ""
     private let inventoryReader: ()->UnsafeMutablePointer<CChar>?
     private var chooseInitialDevices = false
-    private var pendingNames = false
     private func beginIO(_ text:String, quiet:Bool = false) -> Task<Void,Never> {
         ioBusy=true; ioStatus=quiet ? "" : text
         return Task { [weak self] in
@@ -144,11 +19,9 @@ enum AudioWorker {
     }
     private func endIO(_ watchdog:Task<Void,Never>) {
         watchdog.cancel(); ioBusy=false; ioStatus=""
-        updateAutomaticSync()
-        if pendingNames { scheduleNamesUpdate() }
     }
     private func performIO(_ text:String, quiet:Bool = false, _ work:@escaping @MainActor () async throws -> Void) {
-        guard !ioBusy, syncTask == nil else { return }
+        guard !ioBusy else { return }
         let watchdog=beginIO(text,quiet:quiet)
         Task {
             defer { endIO(watchdog) }
@@ -168,33 +41,32 @@ enum AudioWorker {
     @Published var labelSelection: Port?
     @Published var pendingRemoval: Device?
     @Published var saveStatus = ""
-    @Published var syncStatus = ""
     private let sessionStore: SessionStore
     private var autosaveReady = false
     private var timer: Timer?
-    private var namesUpdate: DispatchWorkItem?
-    private var publishedNames: String?
-    private var inventoryObserver: DeviceInventoryObserver?
     private var inventoryTicks=0
-    private var automaticSyncEnabled=false
-    private var service=false
     private var liveRuntime=false
-    private var appliedRuntime=""
-    private var runtimeLatencyDiagnostics: String?
-    private var desiredRuntime=""
-    private var nextRuntimeAttempt=Date.distantPast
-    private var runtimeRetry=RateRetrySchedule()
+    @Published private var runtimeLatencyDiagnostics: String?
+    var interfaceTimingText: String {
+        guard let raw=runtimeLatencyDiagnostics,let data=raw.data(using:.utf8),
+              let timing=(try? JSONSerialization.jsonObject(with:data)) as? [String:Any],
+              let members=timing["devices"] as? [[String:Any]] else{return ""}
+        return members.filter{$0["master"] as? Bool != true}.map { member in
+            let id=(member["deviceID"] as? NSNumber)?.uint32Value ?? 0
+            let name=devices.first{$0.id==id}?.shortName ?? "Secondary"
+            let input=(member["inputSkewFrames"] as? NSNumber)?.intValue ?? 0
+            let output=(member["outputSkewFrames"] as? NSNumber)?.intValue ?? 0
+            return "\(name): input +\(input), output +\(output) samples relative to Sync Source" + (member["mutedClockFault"] as? Bool == true ? " · MUTED: clock alignment lost" : "")
+        }.joined(separator:"\n")
+    }
+    var softwareMarginText: String {
+        guard running, let raw=runtimeLatencyDiagnostics, let data=raw.data(using:.utf8),
+              let values=(try? JSONSerialization.jsonObject(with:data)) as? [String:Any],
+              let input=values["inputPadding"] as? Double, let output=values["outputPadding"] as? Double,
+              let rate=values["rate"] as? Double, rate>0 else { return "Software margin: waiting for engine status" }
+        return String(format:"Software margin: %.3f ms input · %.3f ms output",input*1000/rate,output*1000/rate)
+    }
     private var loadingRuntime=false
-    private var lastDesiredRate=0
-    private var pendingPanelRate:Int?
-    private var failureNotified=false
-    private var driverConfiguration=""
-    // Retained through retries: hardware may change before a later stage fails.
-    private var pendingFormatNotification:String?
-    private var notifiedFormatFailure:String?
-    private var syncTask: Task<Void,Never>?
-    private var syncKey=""
-    private var syncGeneration=0
 
     var hardware: [Device] { devices.filter { !$0.aggregate && !$0.uid.hasPrefix("se.studiopatch.") } }
     func isAvailable(_ uid: String) -> Bool { hardware.contains { $0.uid == uid } }
@@ -300,31 +172,7 @@ enum AudioWorker {
         let label=computerLabel(channel,input:input)
         return label.isEmpty ? "\(input ? "To Computer" : "From Computer") \(channel)" : label
     }
-    func channelNamesPayload() throws -> String {
-        let names=["inputs":(0..<preset.inputCount).map { exposedChannelName($0+1,input:true) },
-                   "outputs":(0..<preset.outputCount).map { exposedChannelName($0+1,input:false) }]
-        return String(decoding:try JSONSerialization.data(withJSONObject:names,options:.sortedKeys),as:UTF8.self)
-    }
-    private func scheduleNamesUpdate() {
-        namesUpdate?.cancel()
-        guard service, autosaveReady, installed else { return }
-        pendingNames=true
-        let update=DispatchWorkItem { [weak self] in
-            guard let self, !self.ioBusy, self.syncTask == nil else { return }
-            self.performIO("Updating channel names…") { try await self.publishChannelNames() }
-        }
-        namesUpdate=update
-        DispatchQueue.main.asyncAfter(deadline:.now()+0.4,execute:update)
-    }
-    private func publishChannelNames(force: Bool = false) async throws {
-        guard installed else { return }
-        pendingNames=false
-        let raw=try channelNamesPayload()
-        guard force || raw != publishedNames else { return }
-        let result=try await AudioWorker.call { raw.withCString { SPSetChannelNames($0) } }
-        let status=try JSONSerialization.jsonObject(with:result) as? [String:Any]
-        if status?["ok"] as? Bool == true { publishedNames=raw }
-    }
+    func channelNamesPayload() throws -> String { try runtimeChannelNames(preset:preset,devices:selected) }
     func openComputerLabels(_ channel: Int, input: Bool) {
         guard let port=computerPorts(channel,input:input).first else { return }
         openLabels(port:port,direction:input ? 0 : 1)
@@ -349,8 +197,8 @@ enum AudioWorker {
         return Array(Set(rates + [preset.sampleRate])).sorted()
     }
     var rateMismatch: Bool { selected.filter { isAvailable($0.uid) }.contains { Int($0.sampleRate) != preset.sampleRate } }
-    init(store: SessionStore = SessionStore(), discoverDevices: Bool = true, service: Bool = false, inventoryReader:@escaping ()->UnsafeMutablePointer<CChar>? = { SPInventory() }) {
-        self.service=service; self.liveRuntime=discoverDevices
+    init(store: SessionStore = SessionStore(), discoverDevices: Bool = true, inventoryReader:@escaping ()->UnsafeMutablePointer<CChar>? = { SPInventory() }) {
+        self.liveRuntime=discoverDevices
         self.inventoryReader=inventoryReader
         sessionStore = store
         var isNewSession = false
@@ -365,34 +213,21 @@ enum AudioWorker {
         chooseInitialDevices=isNewSession
         autosaveReady = true
         rememberDevices()
-        automaticSyncEnabled=false
-        updateAutomaticSync()
-        scheduleNamesUpdate()
         if isNewSession { autosave() }
-        if discoverDevices && !service {
+        if discoverDevices {
             do { try restoreActivePreset() }
             catch { self.error="Could not restore the active preset: \(error.localizedDescription)" }
         }
         guard discoverDevices else { return }
-        #if !STUDIOPATCH_MODEL_TESTS
-        if service {
-            inventoryObserver = DeviceInventoryObserver { [weak self] in self?.runtimeTick() }
-        }
-        #endif
-        if service { runtimeTick() }
-        else {
-            do { try RuntimeConnection.launch() } catch { message="Could not start the background engine: \(error.localizedDescription)" }
-            readRuntime()
-            RuntimeConnection.requestNotifications()
-        }
+        do { try RuntimeConnection.launch() } catch { message="Could not start the background engine: \(error.localizedDescription)" }
+        readRuntime()
+        RuntimeConnection.requestNotifications()
         timer = Timer.scheduledTimer(withTimeInterval:1,repeats:true) { [weak self] _ in
             Task { @MainActor in self?.poll() }
         }
     }
     private func autosave() {
-        guard autosaveReady, !service, !loadingRuntime else { return }
-        updateAutomaticSync()
-        scheduleNamesUpdate()
+        guard autosaveReady, !loadingRuntime else { return }
         do {
             try sessionStore.save(preset)
             saveStatus = ""
@@ -410,22 +245,18 @@ enum AudioWorker {
         return raw
     }
     func refresh() {
-        if liveRuntime && !service { readRuntime(); return }
+        if liveRuntime { readRuntime(); return }
         performIO("Reading audio devices from Core Audio…") { try await self.refreshInventory() }
     }
     private func refreshInventory() async throws {
         let raw=try await AudioWorker.call(inventoryReader)
         let inv=try JSONDecoder().decode(Inventory.self,from:raw)
-        inventoryObserver?.update(Set(inv.devices.map(\.id)))
-        driverConfiguration=inv.driverConfig
-        let changed=devices != inv.devices || installed != inv.driverInstalled
         updateInventory(inv.devices); installed=inv.driverInstalled; inventoryKnown=true
         if chooseInitialDevices {
             chooseInitialDevices=false
             preset.devices=hardware.filter { $0.name.contains("UFX") || $0.name.contains("ZED") }.map { Member(uid:$0.uid,drift:false) }
             preset.masterUID=selected.first(where:{$0.name.contains("UFX")})?.uid ?? selected.first?.uid ?? ""
         }
-        if changed { publishedNames=nil; scheduleNamesUpdate() }
     }
     func requestToggle(_ device: Device) {
         let selected=preset.devices.contains { $0.uid == device.uid }
@@ -452,110 +283,15 @@ enum AudioWorker {
         resize()
         return try preset.encoded(forEngine:forEngine)
     }
-    var isSynchronizing: Bool { syncTask != nil }
-    func configure() {
-        performIO("Applying channel counts…") {
-            let raw=try self.payload()
-            _ = try await AudioWorker.call { raw.withCString { SPConfigure($0) } }
-            try await self.publishChannelNames(force:true)
-            self.message="Channel counts applied. Reselect StudioPatch in Ableton if needed."
-            try await self.refreshInventory()
-        }
-    }
-    func requireAvailableDevices() throws {
-        guard missingDevices.isEmpty else {
-            throw NSError(domain:"StudioPatch",code:4,userInfo:[NSLocalizedDescriptionKey:"Audio interfaces unavailable: " + missingDevices.map(\.name).joined(separator:", ")])
-        }
-    }
-    func start() {
-        performIO("Starting routing…") {
-            try await self.refreshInventory()
-            try self.requireAvailableDevices()
-            if self.masterMismatch {
-                throw NSError(domain:"StudioPatch",code:5,userInfo:[NSLocalizedDescriptionKey:"Wait for sample rate synchronization before starting."])
-            }
-            let raw=try self.payload()
-            _ = try await AudioWorker.call { raw.withCString { SPConfigure($0) } }
-            try await self.publishChannelNames(force:true)
-            _ = try await AudioWorker.call { raw.withCString { SPStart($0) } }
-            self.running=true; self.message="Routing active · round-trip latency has not been measured yet"
-        }
-    }
-    func stop() {
-        performIO("Stopping routing…") {
-            await AudioWorker.stop(); self.running=false; self.message="Routing stopped"
-        }
-    }
-    var masterMismatch: Bool {
-        guard let master=hardware.first(where: { $0.uid == preset.masterUID }),
-              preset.devices.contains(where: { $0.uid == master.uid }) else { return false }
-        return Int(master.sampleRate) != preset.sampleRate || selected.contains { !isAvailable($0.uid) || abs($0.sampleRate-master.sampleRate)>0.5 }
-    }
-    private func updateAutomaticSync() {
-        guard automaticSyncEnabled else { return }
-        let key="\(preset.followMaster != false)|\(preset.masterUID)|" + preset.devices.map(\.uid).sorted().joined(separator:"|")
-        if key != syncKey {
-            syncKey=key; syncGeneration += 1; syncTask?.cancel(); syncTask=nil; syncStatus=""
-        }
-        guard preset.followMaster != false, !preset.devices.isEmpty, !preset.masterUID.isEmpty else { return }
-        guard !ioBusy, syncTask == nil, masterMismatch else { return }
-        let generation=syncGeneration
-        let watchdog=beginIO("Synchronizing to sync source…")
-        syncTask=Task { [weak self] in
-            defer {
-                watchdog.cancel()
-                if let self { self.ioBusy=false; self.ioStatus=""; self.syncTask=nil }
-            }
-            var retry=RateRetrySchedule()
-            while !Task.isCancelled {
-                guard let self, self.syncGeneration == generation else { return }
-                // Hardware cannot change frequency while our audio callbacks are using it.
-                if self.running { await AudioWorker.stop(); self.running=false }
-                self.syncStatus="Synchronizing to sync source…"
-                do {
-                    try self.preset.validate(forEditing:true)
-                    let raw=String(decoding:try JSONEncoder().encode(self.preset),as:UTF8.self)
-                    let result=try await AudioWorker.call { raw.withCString { SPFollowMaster($0) } }
-                    guard !Task.isCancelled, self.syncGeneration == generation else { return }
-                    let obj=try JSONSerialization.jsonObject(with:result) as? [String:Any]
-                    if let failure=obj?["error"] as? String { throw NSError(domain:"StudioPatch",code:5,userInfo:[NSLocalizedDescriptionKey:failure]) }
-                    guard let rate=obj?["sampleRate"] as? Int else { throw NSError(domain:"StudioPatch",code:5,userInfo:[NSLocalizedDescriptionKey:"Invalid response during sample rate synchronization."]) }
-                    self.preset.sampleRate=rate
-                    try await self.refreshInventory()
-                    if self.masterMismatch { throw NSError(domain:"StudioPatch",code:5,userInfo:[NSLocalizedDescriptionKey:"The interfaces still report different sample rates."]) }
-                    self.syncStatus="Synchronized to sync source · \(rate) Hz"
-                    self.syncTask=nil
-                    return
-                } catch {
-                    guard !Task.isCancelled, self.syncGeneration == generation else { return }
-                    let delay=retry.failed()
-                    self.syncStatus="\(error.localizedDescription) " + (delay == 0 ? "Retrying immediately (\(retry.failures)/3)." : "Retrying in 5 seconds.")
-                    if delay > 0 { do { try await Task.sleep(nanoseconds:delay) } catch { return } }
-                    else { await Task.yield() }
-                }
-            }
-        }
-    }
     func poll() {
-        if liveRuntime { if service { runtimeTick() } else { readRuntime() }; return }
-        guard !ioBusy, syncTask == nil else { return }
+        if liveRuntime { readRuntime(); return }
+        guard !ioBusy else { return }
         inventoryTicks += 1
         let readInventory=inventoryTicks % 2 == 0
-        guard running || readInventory else { return }
-        performIO("Checking audio status…",quiet:true) {
-            if self.running {
-                let raw=try await AudioWorker.call { SPStatus() }
-                let status=try JSONDecoder().decode(EngineStatus.self,from:raw)
-                if status.invalidated {
-                    await AudioWorker.stop(); self.running=false
-                    self.error="The device, channel format or buffer changed. Audio was muted. The device list will update automatically."
-                } else {
-                    self.message="Routing active · \(status.bufferFrames) samples I/O · \(status.cycles) audio cycles · \(status.badBuffers) buffer errors"
-                }
-            }
-            if readInventory { try await self.refreshInventory() }
-        }
+        guard readInventory else { return }
+        performIO("Checking audio devices…",quiet:true) { try await self.refreshInventory() }
     }
+
     private func readRuntime() {
         do {
             let snapshot=try RuntimeConnection.read()
@@ -564,104 +300,11 @@ enum AudioWorker {
             updateInventory(snapshot.devices)
             installed=snapshot.installed; inventoryKnown=true; running=snapshot.running
             message=snapshot.message
+            runtimeLatencyDiagnostics=snapshot.latencyDiagnostics
             if (8000...384000).contains(snapshot.rate) { preset.sampleRate=snapshot.rate }
             loadingRuntime=false
             if previousDevices != preset.knownDevices { try sessionStore.save(preset) }
         } catch { message=error.localizedDescription }
-    }
-    private func runtimeTick() {
-        guard !ioBusy else { return }
-        ioBusy=true
-        Task {
-            defer {
-                ioBusy=false
-                RuntimeConnection.write(RuntimeSnapshot(devices:devices,installed:installed,running:running,message:message,rate:preset.sampleRate,latencyDiagnostics:runtimeLatencyDiagnostics))
-            }
-            do {
-                if let desired=try sessionStore.load() {
-                    let effective=preset.sampleRate
-                    preset=desired
-                    if lastDesiredRate != 0 && desired.sampleRate != lastDesiredRate {
-                        pendingPanelRate=desired.sampleRate
-                        nextRuntimeAttempt = .distantPast
-                        runtimeRetry=RateRetrySchedule()
-                    }
-                    if desired.sampleRate == lastDesiredRate { preset.sampleRate=effective }
-                    lastDesiredRate=desired.sampleRate
-                }
-                try await refreshInventory()
-                guard Date()>=nextRuntimeAttempt else { return }
-                try requireAvailableDevices()
-                guard installed else { throw NSError(domain:"StudioPatch",code:21,userInfo:[NSLocalizedDescriptionKey:"The StudioPatch driver is unavailable in Core Audio."]) }
-                guard !preset.devices.isEmpty else { await AudioWorker.stop(); running=false; appliedRuntime=""; message="Select audio interfaces and a sync source."; return }
-                var raw=try payload()
-                let rates=try await AudioWorker.call { raw.withCString { SPRuntimeRates($0) } }
-                let values=try JSONSerialization.jsonObject(with:rates) as! [String:Any]
-                let request=(values["requested"] as? Double) ?? 0
-                let masterRate=Int((values["masterRate"] as? Double) ?? Double(preset.sampleRate))
-                if request>0 { pendingPanelRate=nil; preset.sampleRate=Int(request) }
-                else if let panelRate=pendingPanelRate { preset.sampleRate=panelRate }
-                else { preset.sampleRate=masterRate }
-                raw=try payload()
-                if raw != desiredRuntime { desiredRuntime=raw; nextRuntimeAttempt = .distantPast; runtimeRetry=RateRetrySchedule() }
-                let status=try await AudioWorker.call { SPStatus() }
-                let state=try JSONDecoder().decode(EngineStatus.self,from:status)
-                runtimeLatencyDiagnostics=state.latencyDiagnostics
-                if state.invalidated { appliedRuntime=""; running=false }
-                if raw != appliedRuntime || !running || request>0 {
-                    guard Date()>=nextRuntimeAttempt else { return }
-                    let current=driverConfiguration.split(separator:" ").compactMap { Int($0) }
-                    let formatChanged = current.count < 4 || current[1] != preset.inputCount || current[2] != preset.outputCount || current[3] != preset.sampleRate
-                        || selected.contains { abs($0.sampleRate-Double(preset.sampleRate)) > 0.5 }
-                    let format="\(preset.sampleRate) Hz · \(preset.inputCount) To Computer · \(preset.outputCount) From Computer (\(selected.map(\.name).joined(separator:", ")))"
-                    if formatChanged || pendingFormatNotification != nil { pendingFormatNotification=format }
-                    await AudioWorker.stop(); running=false
-                    message="Applying routing and audio format…"
-                    RuntimeConnection.write(RuntimeSnapshot(devices:devices,installed:installed,running:false,message:message,rate:preset.sampleRate))
-                    let hardwareRequest=try JSONSerialization.jsonObject(with:Data(raw.utf8)) as! [String:Any]
-                    // Per-device sync locks apply to both panel and client requests.
-                    let hardwareRaw=String(decoding:try JSONSerialization.data(withJSONObject:hardwareRequest),as:UTF8.self)
-                    _ = try await AudioWorker.call { hardwareRaw.withCString { SPSetHardwareRate($0) } }
-                    _ = try await AudioWorker.call { raw.withCString { SPConfigure($0) } }
-                    let latest=try await AudioWorker.call { raw.withCString { SPRuntimeRates($0) } }
-                    let newer=(try JSONSerialization.jsonObject(with:latest) as? [String:Any])?["requested"] as? Double ?? 0
-                    if newer>0 && newer != Double(preset.sampleRate) { throw NSError(domain:"StudioPatch",code:22,userInfo:[NSLocalizedDescriptionKey:"A new sample rate request is pending."]) }
-                    try await refreshInventory()
-                    try await publishChannelNames(force:true)
-                    _ = try await AudioWorker.call { raw.withCString { SPStart($0) } }
-                    if request>0 {
-                        let ack="{\"ack\":\(request)}"
-                        _ = try await AudioWorker.call { ack.withCString { SPAcknowledgeRate($0) } }
-                    }
-                    if let format=pendingFormatNotification {
-                        RuntimeConnection.notifyFormat(format)
-                        pendingFormatNotification=nil
-                    }
-                    notifiedFormatFailure=nil
-                    pendingPanelRate=nil
-                    appliedRuntime=raw; running=true; failureNotified=false; runtimeRetry=RateRetrySchedule()
-                    message="Routing active · \(preset.bufferFrames) samples I/O · \(preset.sampleRate) Hz"
-                } else {
-                    try await publishChannelNames()
-                    message="Routing active · \(state.bufferFrames) samples I/O · \(state.badBuffers) buffer errors"
-                }
-            } catch {
-                await AudioWorker.stop(); running=false; appliedRuntime=""
-                message="Audio is muted · \(error.localizedDescription)"
-                if let format=pendingFormatNotification {
-                    if notifiedFormatFailure != format {
-                        RuntimeConnection.notifyFormat(format,failure:error.localizedDescription)
-                        notifiedFormatFailure=format
-                    }
-                    failureNotified=true
-                } else if !failureNotified {
-                    RuntimeConnection.notifyFailure(error.localizedDescription); failureNotified=true
-                }
-                let delay=runtimeRetry.failed()
-                nextRuntimeAttempt=Date().addingTimeInterval(Double(delay)/1_000_000_000)
-                if delay == 0 { DispatchQueue.main.async { self.runtimeTick() } }
-            }
-        }
     }
     private var libraryStore: PresetLibraryStore {
         PresetLibraryStore(url:sessionStore.url.deletingLastPathComponent().appendingPathComponent("presets.json"))
@@ -806,16 +449,14 @@ struct ContentView: View {
             Picker("Sample Rate",selection:$m.preset.sampleRate) {
                 ForEach(m.masterSampleRates,id:\.self) {Text("\($0) Hz").tag($0)}
             }
-            if !m.syncStatus.isEmpty { Text(m.syncStatus).font(.caption).foregroundStyle(.secondary) }
             DisclosureGroup("Advanced") {
                 Picker("I/O buffer",selection:$m.preset.bufferFrames) {
                     ForEach([32,64,128,256,512,1024],id:\.self) {Text("\($0) samples").tag($0)}
                 }
-                let outputMargin=Int(ceil(Double(m.preset.sampleRate)/3000.0))
-                let inputMargin=max(outputMargin,m.preset.bufferFrames)
-                Text("Software margin: \(Double(inputMargin)*1000/Double(m.preset.sampleRate), specifier: "%.3f") ms input · \(Double(outputMargin)*1000/Double(m.preset.sampleRate), specifier: "%.3f") ms output")
+                if !m.interfaceTimingText.isEmpty {Text(m.interfaceTimingText).font(.caption).foregroundStyle(.secondary)}
+                Text(m.softwareMarginText)
                     .font(.caption).foregroundStyle(.secondary)
-                Text("Reported latency also includes the Sync Source interface. Larger I/O buffers can exceed 1 ms extra round trip.")
+                Text("Reported latency also includes the Sync Source interface. The software margin can exceed 1 ms round trip depending on sample rate and I/O buffer.")
                     .font(.caption).foregroundStyle(.secondary)
             }
             Divider()

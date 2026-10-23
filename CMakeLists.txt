@@ -56,15 +56,26 @@ add_custom_command(OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/session-tests"
         "${CMAKE_CURRENT_SOURCE_DIR}/Sources/SessionStore.swift"
         "${CMAKE_CURRENT_SOURCE_DIR}/Sources/Matrix.swift"
         "${CMAKE_CURRENT_SOURCE_DIR}/Sources/RuntimeConnection.swift"
+        "${CMAKE_CURRENT_SOURCE_DIR}/Sources/RuntimeTypes.swift"
+        "${CMAKE_CURRENT_SOURCE_DIR}/Sources/RuntimeController.swift"
         "${CMAKE_CURRENT_SOURCE_DIR}/Sources/App.swift"
         "${CMAKE_CURRENT_SOURCE_DIR}/Tests/SessionTests.swift"
         "$<TARGET_FILE:patchbridge>"
         -framework UserNotifications -framework SwiftUI -framework AppKit -framework Foundation -framework CoreAudio -lc++
         -o "${CMAKE_CURRENT_BINARY_DIR}/session-tests"
-    DEPENDS Sources/Preset.swift Sources/SessionStore.swift Sources/Matrix.swift Sources/RuntimeConnection.swift Sources/App.swift Sources/Bridge.h Tests/SessionTests.swift patchbridge VERBATIM)
+    DEPENDS Sources/Preset.swift Sources/SessionStore.swift Sources/Matrix.swift Sources/RuntimeConnection.swift Sources/RuntimeTypes.swift Sources/RuntimeController.swift Sources/App.swift Sources/Bridge.h Tests/SessionTests.swift patchbridge VERBATIM)
 add_custom_target(session-tests-build ALL DEPENDS "${CMAKE_CURRENT_BINARY_DIR}/session-tests")
 add_test(NAME session-tests COMMAND "${CMAKE_CURRENT_BINARY_DIR}/session-tests")
 
-add_executable(runtime-policy-tests Tests/RuntimePolicyTests.cpp)
-target_compile_options(runtime-policy-tests PRIVATE -UNDEBUG)
-add_test(NAME runtime-policy-tests COMMAND runtime-policy-tests)
+add_executable(latency-capture Tools/latency-capture.cpp)
+target_link_libraries(latency-capture PRIVATE "-framework CoreAudio" "-framework CoreFoundation")
+add_executable(capture-stream-tests Tests/CaptureStreamTests.cpp)
+target_compile_options(capture-stream-tests PRIVATE -UNDEBUG)
+target_link_libraries(capture-stream-tests PRIVATE "-framework CoreAudio" "-framework CoreFoundation")
+add_test(NAME capture-stream-tests COMMAND capture-stream-tests)
+
+add_executable(async-resource-tests Tests/AsyncResourceTests.cpp)
+target_compile_options(async-resource-tests PRIVATE -UNDEBUG)
+add_test(NAME async-resource-tests COMMAND async-resource-tests)
+add_executable(profile-review Tools/profile-review.cpp)
+target_link_libraries(profile-review PRIVATE aspl)

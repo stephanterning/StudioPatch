@@ -55,11 +55,11 @@ Sync Source input → physical I/O callback → shared capture timeline → Stud
 DAW → StudioPatch output → shared playback timeline → physical I/O callback → Sync Source output
 ```
 
-The selected Sync Source supplies the sample/host clock. Its path copies native Float32 samples without gain, mixing or resampling. Capture and playback have independent tagged atomic storage; absent or overwritten frames become silence. The panel is independent of the background service. An authenticated launchd broker shares memory between the signed service and the sandboxed AudioServerPlugIn. IPC occurs during configuration, never in an audio callback. The underlying libASPL I/O wrapper still uses its existing mutex; this change does not claim the entire driver stack is lock-free.
+The selected Sync Source supplies the sample/host clock. Its path copies native Float32 samples without gain, mixing or resampling. Capture and playback have independent tagged atomic storage; absent or overwritten frames become silence. The panel is independent of the background service. An authenticated launchd broker shares memory between the signed service and the sandboxed AudioServerPlugIn. IPC occurs during configuration, never in an audio callback. The libASPL I/O wrapper still serializes audio operations, but StudioPatch uses a separate lifecycle lock for client start/stop. Its timestamp implementation does not use libASPL’s mutable start/stop clock; the entire driver stack is not lock-free.
 
 Other clock-locked interfaces have separate physical callbacks and safety-offset allowances. A secondary device with drift correction enabled uses a private Apple aggregate with Sync Source as its clock reference; only that secondary's routes pass through it. StudioPatch does not implement its own sample-rate converter. The user's existing aggregates and default devices are unchanged.
 
-Visible input/output latency is the Sync Source's device + maximum stream latency plus the corresponding StudioPatch margin. Safety offsets match Sync Source and are reported separately. Core Audio configuration changes apply timing updates before startup. At 32-frame engine I/O, margins are 32 input + 32 output frames at 96 kHz, and 32 input + 16 output frames at 48 kHz. Larger engine buffers require a larger capture margin and can exceed the 1 ms target. These are engine buffers; a DAW's 256-frame buffer remains a separate setting. Advanced settings show the current margins. Old preset margin fields are retained for compatibility but no longer control this transport.
+Visible input/output latency is the Sync Source's device + maximum stream latency plus the corresponding StudioPatch margin. Safety offsets match Sync Source and are reported separately. Core Audio configuration changes apply timing updates before startup. At 32-frame engine I/O, margins are 32 input + 32 output frames at 96 kHz, and 32 input + 32 output frames at 48 kHz. Both directions retain at least one engine buffer after load tests found short playback corruption with a 16-frame output margin. At 48 kHz this is 1.333 ms added round trip, above the original 1 ms target; a lower-latency mode is not yet qualified. Larger engine buffers increase both margins. These are engine buffers; a DAW's 256-frame buffer remains a separate setting. Advanced settings show the current margins. Old preset margin fields are retained for compatibility but no longer control this transport.
 
 Other interfaces can have different path latency; global reporting intentionally refers to Sync Source. Independently measured hardware error remains separate. The [measurement record](Docs/LATENCY-DIRECT-2026-10-23.md) distinguishes measured duplex RTL, timestamp-referenced delay and HAL reports, and lists unverified configurations. Brief tests are not a long-duration stability qualification.
 
@@ -95,7 +95,7 @@ To uninstall, close audio applications, run `sudo ./Scripts/uninstall-driver.sh`
 
 `route-tests` uses the actual engine callback with synthetic UFX, ZED and bridge buffers to check reordering, both directions, silent unused outputs and silence after layout changes.
 
-`rate-tests` covers never writing to the master, delayed confirmation, already synchronized interfaces, rejection of busy/read-only/incompatible interfaces, timeouts and master changes during synchronization. Tests use simulated driver calls. Actual UFX/ZED rate changes have not yet been tested. Changes during audio still stop routing; automatic synchronization then attempts to follow the master.
+`rate-tests` covers never writing to the master, delayed confirmation, already synchronized interfaces, rejection of busy/read-only/incompatible interfaces, timeouts and master changes during synchronization. Tests use simulated driver calls. Physical UFX/ZED rate changes and their exact tested configurations are recorded in `Docs/REVIEW-ACTIONS-2026-10-23.md`. Changes during audio still stop routing; automatic synchronization then attempts to follow the master.
 
 `preset-tests` exercises the app's actual Swift model: independent input/output reductions, saving/opening dormant connections, restoring counts, zero channels in one direction, explicit disconnection and older preset formats. Engine JSON receives only active connections. `route-tests` also checks that removed active routes are silenced without residual samples and can be reactivated in both directions.
 
@@ -103,7 +103,7 @@ Remaining before production use: actual HAL loading/reconfiguration, signed dist
 
 ## Sources and licenses
 
-- libASPL is pinned to `633e0f70203edd87d320fc5a3cae901e1363aac5` and included unchanged in `Vendor/libASPL`. Its MIT and Apple licenses are stored there.
+- libASPL is pinned to `633e0f70203edd87d320fc5a3cae901e1363aac5` with local cycle-timing and opt-in lifecycle-lock changes in `Vendor/libASPL`. Its MIT and Apple licenses are stored there.
 - [libASPL](https://github.com/gavv/libASPL)
 - [Apple: Creating an Audio Server Driver Plug-in](https://developer.apple.com/documentation/coreaudio/creating-an-audio-server-driver-plug-in)
 - Aggregate properties and channel order follow the documentation in Xcode's `CoreAudio/AudioHardware.h`.
@@ -121,3 +121,46 @@ Unregister the background service with `launchctl bootout gui/$(id -u) "$HOME/Li
 ### Local signing
 
 The build uses the certificate fingerprint in `Scripts/signing-identity.txt` and requires its private key in the user's Keychain. On another development computer, set `STUDIOPATCH_SIGNING_IDENTITY` or update the fingerprint. No private key is included in the project. The app and embedded engine use the same certificate and signing identifier (`se.studiopatch.app`) for a shared permission identity. The build does not automatically fall back to ad hoc signing. The first transition from older local builds may require renewed audio-access consent.
+
+### Broker identity and login sessions
+
+The broker authorizes the signed StudioPatch service for the current `/dev/console` user and Apple's Core Audio daemon. Background users in fast user switching do not receive service access; run the engine in the active console login. This is a current product limitation.
+
+`Scripts/build.sh` captures the service's designated signing requirement in `Dist/service.requirement`. After changing the signing identity, reinstall the broker with the matching requirement as well as the app and driver. Replacing only the app can leave a correctly signed service that the old broker rejects. The broker retains the shared-memory mapping for the current session; existing peer mappings remain independent when a new session replaces it.
+
+
+### Review implementation notes (2026-10-23)
+
+`RuntimeController.swift` owns the service state machine independently of SwiftUI. The service build excludes `App.swift` and `Matrix.swift`; integration tests execute the actual controller. Session-file replacement and HAL inventory events trigger refreshes. A one-second heartbeat remains for status, client rate requests and recovery; inventory has a five-second fallback. Physical latency/stream-latency changes invalidate the engine and republish timing during restart. There is no 100 ms latency polling timer.
+
+HAL initialization publishes the visible device immediately with silent transport while an asynchronous worker connects to the broker. The `spts` property reports `connecting` or `ready` and the attempt count. Acquisition retries with bounded backoff. Driver connections re-register their existing mapping after broker interruption, preserving storage identity. Audio callbacks perform no XPC or signature checks. The production factory creates one endpoint; the legacy engine is compiled only for explicit test builds and direct sessions allocate no legacy sample rings.
+
+Custom control writes (`spcf`, `spnm`, `sprt`, `sprq`, `splt`) require the broker-registered PID for the current generation held by a live XPC connection whose signature and console-user identity the broker validated. Standard HAL sample-rate requests remain available to audio clients. The broker revokes the registration when that connection dies; the driver revokes it on broker interruption. Install all components together.
+
+Advanced diagnostics show each secondary interface’s calculated input/output latency difference relative to Sync Source. These are reported hardware/safety-offset estimates, not measurements of the analog path. Secondary host/sample alignment is monitored continuously. A deviation exceeding `max(32, callbackFrames/4)` for at least three callbacks spanning 20 ms latches a mute and warning for that secondary until service restart. This detects timestamp drift or jumps; it is not a direct read of ADAT lock status. Fast paths remain unaligned to slower hardware. A common aligned mode would intentionally add latency and is not part of this release.
+
+The complete finding-by-finding disposition and hardware evidence are in `Docs/REVIEW-ACTIONS-2026-10-23.md`. Tagged storage is retained after profiling; no high-water-only validity scheme is used.
+
+### Bounded hardware captures
+
+`Tools/run-hardware-capture.py` runs the built `latency-capture` tool as the current user. It requires explicit device UID, input/output channel and result prefix. Use an isolated loopback: the selected output receives the test signal. Output 0 disables playback. For example, with the existing UFX channel-3 loopback:
+
+```sh
+python3 Tools/run-hardware-capture.py --capture build/latency-capture \
+  --uid RMEUSBDevice-131-24243649 --input 3 --output 3 \
+  --seconds 30 --buffer 256 --load 0 --prefix work/capture-001
+```
+
+The runner refuses an existing result prefix, limits duration to 300 seconds, and terminates its own capture process if it exceeds the requested duration by 20 seconds or Core Audio stays above 80% of one CPU core for ten seconds. Cancellation also terminates the capture. Partial files and a failure report remain available. Successful acquisition still needs timestamp analysis and waveform comparison; it is not itself an audio-integrity pass.
+
+These measurements and user-service updates need no administrator password. Do not perform Core Audio or broker fault injection on this working workstation: earlier system-restart qualification caused global enumeration/CPU failures. Use simulated failures for recovery tests and the bounded runner for normal hardware audio. Additional disruptive system qualification requires a separate controlled environment.
+
+When a launch-agent plist exists, the panel starts that registered job (bootstrapping it if necessary). It reports a launch failure instead of creating an unmanaged fallback process. Keep the plist's executable in a persistent location; temporary staging directories may disappear at reboot.
+
+### Bounded service recovery
+
+Plug-in lookup falls back to enumerating individual bundle IDs when HAL's bundle translation fails, skipping stale unrelated objects without caching their IDs. Structured Core Audio errors reach the runtime controller. A bad-object failure persisting for at least three attempts and ten seconds requests a fresh service process image; a control task still blocked after 30 seconds requests the same recovery independently of the blocked worker. Only StudioPatch replaces itself. No system service is restarted.
+
+A persistent `recovery-attempt.json` in the application-support directory permits at most one automatic replacement per ten minutes. Another failure inside that interval stops the service with successful exit so launchd does not loop. Invalid or unwritable recovery state also stops safely. The stopped reason remains readable beyond the ordinary snapshot freshness limit. This is a circuit breaker, not a guarantee that every hardware or HAL fault is repairable. After correcting the underlying device problem, reopen the control panel to start the managed service. Do not delete the limiter file to force repeated recovery attempts.
+
+Stopped/reconfiguring engines clear obsolete timing diagnostics. Invalidated or unexpectedly stopped engines rebuild through the existing serialized controller. A secondary clock fault stays muted: automatic unmuting without evidence of clock lock is deliberately excluded. Synthetic runtime tests cover transient format failures, disconnect/reconnect, invalid clock recovery, persistent HAL errors, blocked calls and the cross-process restart limit. They do not force the real computer to sleep or disrupt the live broker.

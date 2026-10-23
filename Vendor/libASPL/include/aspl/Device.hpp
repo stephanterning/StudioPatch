@@ -124,6 +124,11 @@ struct DeviceParameters
     //! This is not suitable for production use because tracer is not realtime-safe
     //! and because realtime operations are too frequent.
     bool EnableRealtimeTracing = false;
+
+    // Opt-in for devices whose StartIOImpl/StopIOImpl do not mutate the
+    // base timestamp state or any I/O-owned state. Keeps lifecycle work off
+    // the audio mutex while preserving serialization among lifecycle calls.
+    bool IndependentIOLifecycle = false;
 };
 
 //! Audio device object.
@@ -1269,6 +1274,7 @@ private:
 
     // serializes I/O operations and protects fields below
     mutable std::recursive_mutex ioMutex_;
+    mutable std::recursive_mutex lifecycleMutex_;
 
     // how much host clock ticks are per audio frame and what was the sample
     // rate when this value was calculated

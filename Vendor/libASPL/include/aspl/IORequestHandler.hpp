@@ -40,6 +40,8 @@ public:
 
     virtual ~IORequestHandler() = default;
 
+    virtual void OnCycleTiming(UInt32 operation, const AudioServerPlugInIOCycleInfo& cycle) {}
+
     //! @name Reading per-client samples from device
     //! @{
 

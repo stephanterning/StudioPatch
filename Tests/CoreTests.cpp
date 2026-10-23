@@ -5,6 +5,7 @@
 #include <iostream>
 #include <thread>
 #include <vector>
+#include <future>
 
 static std::vector<AudioObjectPropertyAddress> nameChanges;
 static OSStatus recordChanges(AudioServerPlugInHostRef, AudioObjectID, UInt32 count, const AudioObjectPropertyAddress* a) {
@@ -289,7 +290,55 @@ static void testLatencyReporting() {
     assert(set(std::to_string(anchor)+" 700 624 trailing")!=noErr);
 }
 
+static void testInitializeDoesNotNotifyUnpublishedGraph() {
+    auto ctx=std::make_shared<aspl::Context>(std::make_shared<aspl::Tracer>(aspl::Tracer::Mode::Noop));
+    auto plugin=std::make_shared<patch::PatchPlugin>(ctx);
+    static std::atomic<int> notices{0};notices=0;
+    AudioServerPlugInHostInterface host{};
+    host.CopyFromStorage=[](AudioServerPlugInHostRef,CFStringRef key,CFPropertyListRef* out)->OSStatus {
+        *out=CFEqual(key,CFSTR("configuration-v1"))?CFRetain(CFSTR("1 4 2 96000 256")):nullptr;return noErr;
+    };
+    host.PropertiesChanged=[](AudioServerPlugInHostRef,AudioObjectID,UInt32,const AudioObjectPropertyAddress*)->OSStatus {++notices;return noErr;};
+    host.RequestDeviceConfigurationChange=[](AudioServerPlugInHostRef,AudioObjectID,UInt64,void*)->OSStatus {++notices;return noErr;};
+    ctx->Host=&host;patch::Initialization init(ctx,plugin);
+    assert(init.OnInitialize()==noErr && ctx->Host.load()==&host);
+    aspl::DrainHostCallbacksForTesting();assert(notices==0);
+    auto device=plugin->GetDeviceByIndex(0);assert(device->GetNominalSampleRate()==96000);
+    assert(device->GetStreamByID(device->GetStreamIDs(kAudioObjectPropertyScopeInput)[0])->GetChannelCount()==4);
+    ctx->Host=nullptr;
+}
+
+static void testIndependentLifecycle() {
+    struct SlowControl final:aspl::ControlRequestHandler {
+        std::promise<void> entered,release;
+        OSStatus OnStartIO() override {entered.set_value();release.get_future().wait();return noErr;}
+    };
+    auto ctx=std::make_shared<aspl::Context>(std::make_shared<aspl::Tracer>(aspl::Tracer::Mode::Noop));
+    auto session=std::make_shared<patch::Session>(patch::Config{});
+    auto device=patch::endpoint(ctx,session,false);auto slow=std::make_shared<SlowControl>();
+    device->SetControlHandler(slow);
+    auto started=std::async(std::launch::async,[&]{return device->StartIO(device->GetID(),1);});
+    slow->entered.get_future().wait();
+    auto stamp=std::async(std::launch::async,[&]{double sample;uint64_t host,seed;return device->GetZeroTimeStamp(device->GetID(),1,&sample,&host,&seed);});
+    bool independent=stamp.wait_for(std::chrono::seconds(1))==std::future_status::ready;
+    slow->release.set_value(); // Always release before asserting, including on regression.
+    assert(started.get()==noErr && stamp.get()==noErr && independent);
+    assert(device->StopIO(device->GetID(),1)==noErr);
+    assert(device->StopIO(device->GetID(),1)!=noErr);
+}
+
 int main() {
+    assert(patch::supportedSampleRate(8000) && patch::supportedSampleRate(192000) && patch::supportedSampleRate(384000));
+    assert(!patch::supportedSampleRate(7999) && !patch::supportedSampleRate(384001) && !patch::supportedSampleRate(48000.5));
+    assert(!patch::supportedSampleRate(NAN) && !patch::supportedSampleRate(INFINITY));
+    {
+        auto direct=patch::makeDriver();auto plugin=direct->GetPlugin();assert(plugin->GetDeviceCount()==1);
+        CFStringRef value=CFSTR("0");
+        for(auto key:{patch::ConfigProperty,patch::NamesProperty,patch::RatesProperty,patch::RateRequestProperty,patch::LatencyProperty}) {
+            AudioObjectPropertyAddress a{key,kAudioObjectPropertyScopeGlobal,0};
+            for(auto pid:{0,getpid()})assert(plugin->SetPropertyData(plugin->GetID(),pid,&a,0,nullptr,sizeof(value),&value)==kAudioHardwareIllegalOperationError);
+        }
+    }
     testLatencyReporting();
     testInitializeAndRejectedChanges();
     testLiveConfiguration();
@@ -297,6 +346,18 @@ int main() {
     testStorageReentry();
     using namespace patch;
     testChannelNames();
+    testIndependentLifecycle();
+    testInitializeDoesNotNotifyUnpublishedGraph();
+    {
+        auto region=mmap(nullptr,sizeof(SharedTransport),PROT_READ|PROT_WRITE,MAP_ANON|MAP_SHARED,-1,0);
+        assert(region!=MAP_FAILED);auto state=new(region) SharedTransport;state->generation=42;
+        auto object=xpc_shmem_create(region,sizeof(SharedTransport));assert(object);
+        void* mapped=nullptr;auto bytes=xpc_shmem_map(object,&mapped);
+        assert(validSharedRegion(static_cast<SharedTransport*>(mapped),bytes,42));
+        assert(!validSharedRegion(static_cast<SharedTransport*>(mapped),sizeof(SharedTransport)-1,42));
+        assert(!validSharedRegion(static_cast<SharedTransport*>(mapped),bytes,43));
+        munmap(mapped,bytes);xpc_release(object);munmap(region,sizeof(SharedTransport));
+    }
     assert(Config::parse("1 37 21 48000 64").outputs == 21);
     for (auto invalid : {"", "1 -1 2 48000 64", "1 129 2 48000 64",
         "1 0 0 48000 64", "1 3 5 7999 64", "1 3 5 48000 0", "1 2 2 48000 64 extra"}) {
@@ -316,7 +377,7 @@ int main() {
     ring.read(RingFrames-1, output, 2);
     for (float v : output) assert(v == 0);
 
-    auto driver = makeDriver();
+    auto driver = makeDriver(false);
     auto plugin = std::dynamic_pointer_cast<PatchPlugin>(driver->GetPlugin());
     assert(plugin->configure(Config::parse("1 3 5 48000 64"), false) == noErr);
     auto visible = plugin->GetDeviceByIndex(0);
