@@ -2,7 +2,13 @@
 
 ## Open-source repository
 
-StudioPatch is an experimental macOS virtual audio device and routing control panel. The original StudioPatch code is available under the [MIT license](LICENSE). Vendored libASPL and its Apple-derived portions retain their [upstream licenses](Vendor/libASPL/LICENSE), [Apple 2012 notice](Vendor/libASPL/LICENSE.apple2012) and [Apple 2020 notice](Vendor/libASPL/LICENSE.apple2020).
+StudioPatch is an experimental macOS virtual audio device and routing control panel. The original StudioPatch code is licensed under the [GNU Affero General Public License, version 3 only (AGPL-3.0-only)](LICENSE). Copyright (c) 2026 Stephan Terning.
+
+StudioPatch is free software: you can redistribute it and/or modify it under the terms of version 3 of the GNU Affero General Public License as published by the Free Software Foundation. It is distributed without any warranty; without even the implied warranty of merchantability or fitness for a particular purpose. See [LICENSE](LICENSE) for the full terms.
+
+The aim is to give back to the community: when sharing covered versions, or letting users interact with a modified version over a network, provide the corresponding source code as required by the license.
+
+Vendored libASPL and its Apple-derived portions retain their [upstream licenses](Vendor/libASPL/LICENSE), [Apple 2012 notice](Vendor/libASPL/LICENSE.apple2012) and [Apple 2020 notice](Vendor/libASPL/LICENSE.apple2020).
 
 For development, use macOS 14 or later, Xcode with its command-line tools, CMake and Python 3. Provide your own certificate-backed signing identity via `STUDIOPATCH_SIGNING_IDENTITY` or a local `Scripts/signing-identity.txt` file. That file, build products and private keys are excluded from Git.
 
