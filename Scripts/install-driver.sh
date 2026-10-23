@@ -23,6 +23,13 @@ if [[ "$(/usr/libexec/PlistBuddy -c 'Print CFBundleIdentifier' "$task_source/Con
     echo "Unexpected bundle identifier. Refusing installation."
     exit 1
 fi
+if /usr/libexec/PlistBuddy -c 'Print AudioServerPlugIn_MachServices' "$task_source/Contents/Info.plist" >/dev/null 2>&1; then
+    if ! cmp -s "$task_root/Dist/StudioPatchBroker" /Library/PrivilegedHelperTools/se.studiopatch.transport/broker ||
+       ! launchctl print system/se.studiopatch.transport >/dev/null 2>&1; then
+        echo "Install the matching transport first: sudo bash Scripts/install-transport.sh"
+        exit 1
+    fi
+fi
 mkdir -p /Library/Audio/Plug-Ins/HAL
 if [[ -e "$task_target" ]]; then
     if [[ -L "$task_target" || "$(/usr/libexec/PlistBuddy -c 'Print CFBundleIdentifier' "$task_target/Contents/Info.plist")" != "se.studiopatch.driver" ]]; then

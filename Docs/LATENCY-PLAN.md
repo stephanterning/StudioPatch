@@ -1,12 +1,32 @@
 # Latency improvement plan and handoff
 
-Updated: 2026-10-23. Status: investigation complete; optimization and physical measurements have NOT started. Resume only when the user asks. No background monitoring or scheduled work has been created.
+Updated: 2026-10-23. Current user requirement: at most 1 ms added round trip over the selected Sync Source, accurate directional reporting, and no significant stability regression. The later stability constraint supersedes the earlier instruction to defer stability work. Version 0.1.1 reporting is implemented, installed and physically checked at 48/96 kHz and 32/64-frame engine buffers. See [measurement results](LATENCY-MEASUREMENT-2026-10-23.md) for accuracy limits and remaining DAW/stability work.
 
-## Objective and boundaries
+## Current performance target — clarified after reporting verification
 
-Reduce StudioPatch's added audio latency while preserving routing correctness, recovery and practical stability. Establish measured evidence before changing defaults. No absolute stability guarantee can be inferred from a finite test. Matching OMNIBUS is an aspiration, not a measured target or established result.
+The user requires approximately **at most 1 ms EXTRA round-trip latency over the selected Sync Source interface used directly**. This is not a 1 ms total-latency target and not 1 ms per direction. At 96 kHz the added budget is 96 frames for input + output together.
 
-The present user request is documentation only. Do not install a driver, restart Core Audio, change buffers/rates/routing, or play test signals as part of this handoff.
+Compare the same physical path, sample rate, actual client buffer, signal/measurement method and driver error compensation. Preserve correct HAL reporting throughout optimization. Do not compare device-property totals alone when direct and virtual devices have different safety offsets: the end-to-end comparison must account for client scheduling consistently.
+
+The user's Ableton screenshots show 96 kHz / 256 samples / 5 samples error compensation: direct UFX III 6.93 ms overall versus StudioPatch 19.2 ms, approximately 12.27 ms extra. The corresponding target for that comparison is approximately 7.93 ms overall or less. Screenshots are reported latency, not a new physical measurement.
+
+Read-only runtime inspection after the screenshots confirms that the StudioPatch engine is already at 32-frame I/O and 64-frame transport margin, with UFX as Sync Source and ZED selected. Aggregate timestamp gap remains 546 frames (input safety 323, output safety 159). Reducing Ableton's 256-frame buffer is not the solution to a same-buffer overhead requirement. Investigate bypassing the hidden bridge/aggregate scheduling overhead on the Sync Source path; retain other interface routing and measure the same reference path with those devices selected. A direct shared-memory candidate has now measured 64 added frames (0.667 ms) at 96 kHz / 256 client frames. The latest implementation and acceptance evidence are recorded in `LATENCY-DIRECT-2026-10-23.md`; intermediate candidates with missing input frames were rejected.
+
+## Primary objective — accurate latency reporting
+
+Report the selected Sync Source interface + StudioPatch latency independently for input and output. The user explicitly selected Sync Source as the reporting reference even when other interfaces are routed; with UFX III selected, ZED must not replace that reference with its own reported latency. Other interfaces may have different actual path latency. Keep the interface's reported latency, any independently measured interface error, and StudioPatch's added delay separate. Do not assume equal input/output delays or divide a measured round trip by two.
+
+The user connected UFX III analog output 3 to analog input 3 by TRS, confirmed TotalMix Software Playback 3 feeds output 3 without feedback, and confirmed isolation from speakers/headphones. Low-level test playback on this path is authorized. Current preset already maps virtual channel 3 to this physical channel in both directions.
+
+Work order (supersedes the numbered historical stages below):
+
+1. Capture direct UFX loopback with raw samples and input/output host timestamps; compare the timestamp-referenced path delay with device + stream latency. Record client buffer and safety offset separately, without double counting scheduling already included in timestamps.
+2. Capture the identical physical route via StudioPatch, with simultaneous direct UFX input observation. Use matched sample provenance and timestamps to distinguish added input and output delay. Do not assign a hardware loopback residual to a particular direction without an independent reference.
+3. Inspect the private aggregate's actual callback timestamps, stream latencies and alignment. Derive the reporting model from the full path, including hidden-bridge timing and drift correction; a transport-margin sum alone is insufficient.
+4. Implement separate Core Audio input/output latency publication and property-change notifications. Validate across rate/buffer changes and route changes, including channel-specific hardware latency limitations. Keep physical-interface calibration explicit and separate from software delay.
+5. Repeat physical and recording-alignment checks against published properties. Correct reporting is not finished until readback and measured timing agree within a stated measurement uncertainty. Stability optimization follows this milestone.
+
+Historical optimization stages below are retained as later work, not prerequisites for this reporting task. Preserve normal routing correctness while investigating. No background monitoring is scheduled.
 
 ## Read first
 
@@ -30,7 +50,7 @@ The baseline is a dated observation, not a guarantee of current settings. Re-rea
 - Active named preset, unsaved session, labels, channel display order and routing persist. Asterisk compares user configuration against explicit save. Display reordering must not restart audio.
 - Maintain the certificate identity shared by app and embedded service. Do not reset TCC or fall back to ad hoc signing.
 
-## Baseline and unknowns
+## Historical baseline and unknowns (before 0.1.1)
 
 Normal studio topology: UFX III via USB3, M-1610 Pro via MADI to UFX, ZED-R16 via FireWire/Thunderbolt; user reports ADAT synchronization with UFX as source. Verify actual external sync lock and firmware/driver versions at measurement time.
 
@@ -149,7 +169,7 @@ Use `Scripts/install-driver.sh --replace` only for a deliberate driver experimen
 4. Restore paired session/preset backups only if the experiment changed them; preserve subsequent user edits separately rather than overwriting them silently.
 5. Recheck device UIDs, physical clock lock, sample rate, buffers, routes and normal recovery. Record rollback outcome.
 
-## Resume checklist
+## Historical optimization resume checklist (reporting now implemented)
 
 - [ ] Confirm the user's current setup and active preset; preserve unsaved edits.
 - [ ] Snapshot baseline source/binaries/session and identify installed driver version.

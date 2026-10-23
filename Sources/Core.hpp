@@ -54,25 +54,27 @@ public:
         for (size_t i = 0; i < size_t(RingFrames) * channels; ++i) samples_[i].store(0);
         for (uint32_t i = 0; i < RingFrames; ++i) tags_[i].store(-1);
     }
-    void write(int64_t frame, const float* data, uint32_t count) noexcept {
+    void write(int64_t frame, const float* data, uint32_t count, uint32_t stride=0) noexcept {
+        if(!stride)stride=channels_;
         if (frame < 0 || !channels_) return;
         for (uint32_t n = 0; n < count; ++n) {
             const int64_t t = frame + n;
             const size_t slot = uint64_t(t) % RingFrames;
             tags_[slot].store(-1);
             for (uint32_t c = 0; c < channels_; ++c) {
-                uint32_t bits; std::memcpy(&bits, &data[size_t(n) * channels_ + c], 4);
+                uint32_t bits; std::memcpy(&bits, &data[size_t(n) * stride + c], 4);
                 samples_[slot * channels_ + c].store(bits);
             }
             tags_[slot].store(t);
         }
     }
-    void read(int64_t frame, float* data, uint32_t count) noexcept {
+    void read(int64_t frame, float* data, uint32_t count, uint32_t stride=0) noexcept {
+        if(!stride)stride=channels_;
         if (!channels_) return;
         for (uint32_t n = 0; n < count; ++n) {
             const int64_t t = frame + n;
             const size_t slot = uint64_t(t) % RingFrames;
-            float* dest = data + size_t(n) * channels_;
+            float* dest = data + size_t(n) * stride;
             bool present = t >= 0 && tags_[slot].load() == t;
             if (present) {
                 for (uint32_t c = 0; c < channels_; ++c) {

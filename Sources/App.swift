@@ -98,6 +98,7 @@ struct EngineStatus: Decodable {
     let cycles: UInt64
     let badBuffers: UInt64
     let bufferFrames: Int
+    let latencyDiagnostics: String?
 }
 enum AudioWorker {
     static let queue=DispatchQueue(label:"se.studiopatch.audio-control",qos:.userInitiated)
@@ -179,6 +180,7 @@ enum AudioWorker {
     private var service=false
     private var liveRuntime=false
     private var appliedRuntime=""
+    private var runtimeLatencyDiagnostics: String?
     private var desiredRuntime=""
     private var nextRuntimeAttempt=Date.distantPast
     private var runtimeRetry=RateRetrySchedule()
@@ -573,7 +575,7 @@ enum AudioWorker {
         Task {
             defer {
                 ioBusy=false
-                RuntimeConnection.write(RuntimeSnapshot(devices:devices,installed:installed,running:running,message:message,rate:preset.sampleRate))
+                RuntimeConnection.write(RuntimeSnapshot(devices:devices,installed:installed,running:running,message:message,rate:preset.sampleRate,latencyDiagnostics:runtimeLatencyDiagnostics))
             }
             do {
                 if let desired=try sessionStore.load() {
@@ -604,6 +606,7 @@ enum AudioWorker {
                 if raw != desiredRuntime { desiredRuntime=raw; nextRuntimeAttempt = .distantPast; runtimeRetry=RateRetrySchedule() }
                 let status=try await AudioWorker.call { SPStatus() }
                 let state=try JSONDecoder().decode(EngineStatus.self,from:status)
+                runtimeLatencyDiagnostics=state.latencyDiagnostics
                 if state.invalidated { appliedRuntime=""; running=false }
                 if raw != appliedRuntime || !running || request>0 {
                     guard Date()>=nextRuntimeAttempt else { return }
@@ -808,24 +811,11 @@ struct ContentView: View {
                 Picker("I/O buffer",selection:$m.preset.bufferFrames) {
                     ForEach([32,64,128,256,512,1024],id:\.self) {Text("\($0) samples").tag($0)}
                 }
-                Text("Transport margin: \(m.preset.effectiveDelayFrames) samples · \(m.preset.transportMarginMilliseconds, specifier: "%.2f") ms per direction")
+                let outputMargin=Int(ceil(Double(m.preset.sampleRate)/3000.0))
+                let inputMargin=max(outputMargin,m.preset.bufferFrames)
+                Text("Software margin: \(Double(inputMargin)*1000/Double(m.preset.sampleRate), specifier: "%.3f") ms input · \(Double(outputMargin)*1000/Double(m.preset.sampleRate), specifier: "%.3f") ms output")
                     .font(.caption).foregroundStyle(.secondary)
-                Toggle("Automatic transport margin",isOn:Binding(
-                    get:{m.preset.usesAutomaticTransportMargin},
-                    set:{m.preset.automaticTransportMargin=$0}))
-                if m.preset.usesAutomaticTransportMargin {
-                    Text("Follows the I/O buffer: four buffers per direction.")
-                        .font(.caption).foregroundStyle(.secondary)
-                } else {
-                    Picker("Transport margin",selection:$m.preset.delayFrames) {
-                        ForEach([64,128,256,512,1024,2048,4096],id:\.self) {Text("\($0) samples").tag($0)}
-                    }
-                    if m.preset.delayFrames < m.preset.bufferFrames * 2 {
-                        Text("Select at least \(m.preset.bufferFrames * 2) samples for the current I/O buffer.")
-                            .font(.caption).foregroundStyle(.orange)
-                    }
-                }
-                Text("The margin adds latency. Total latency has not been measured.")
+                Text("Reported latency also includes the Sync Source interface. Larger I/O buffers can exceed 1 ms extra round trip.")
                     .font(.caption).foregroundStyle(.secondary)
             }
             Divider()

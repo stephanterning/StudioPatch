@@ -1,4 +1,4 @@
-# StudioPatch — development prototype 0.1
+# StudioPatch — development prototype 0.2
 
 ## Open-source repository
 
@@ -18,13 +18,13 @@ bash Scripts/test-runtime.sh
 Build products are written to `Dist/`. Building does not install the driver or restart audio services. Read [BACKGROUND-RUNTIME.md](BACKGROUND-RUNTIME.md) before installation and [Docs/LATENCY-PLAN.md](Docs/LATENCY-PLAN.md) before latency work. The historical development notes below include superseded behavior; the handoff notice identifies those limitations.
 
 
-> **Current handoff, 2026-10-23:** [Latency plan](Docs/LATENCY-PLAN.md), [baseline review](Docs/LATENCY-REVIEW-2026-10-23.md) and [measurement record](Docs/LATENCY-RUN-TEMPLATE.md). Latency optimization and physical loopback measurements have not started. Work resumes only at the user's request.
+> **Current handoff, 2026-10-23:** The direct transport in 0.2 replaces the hidden audio bridge. Sync Source channels use hardware-clocked shared memory; independently clocked secondary devices use Apple drift correction on their own paths. See [direct-path measurements and limits](Docs/LATENCY-DIRECT-2026-10-23.md). Correct directional reporting and signal integrity are requirements alongside the 1 ms added-round-trip target.
 >
 > **Historical notice:** Several sections below describe older prototypes and are not current operating instructions. Routing now runs automatically in a background service; the app is a control panel. Individual synchronization locks, built-in named presets and a persistent active preset with unsaved changes are available. The app and service use certificate signing. Manual Start/Stop, file-based preset buttons, global Follow clock master and automatic ad hoc signing no longer apply. Read the new plan's current-state, build and recovery sections before continuing.
 
 A local macOS app and virtual Core Audio driver for freely ordered channels from multiple audio interfaces. Intended for UFX III (including MADI channels from the M-1610 Pro) and ZED-R16.
 
-**Status: buildable prototype, not a verified replacement for the RME driver.** Audio logic and the channel model are tested in process. Core Audio loading, Ableton operation and physical round-trip latency remain to be verified. Opening the app produces no audio. All routes are disconnected on first launch; subsequent launches restore the last session.
+**Status: hardware-tested development prototype.** Core Audio loading and physical UFX round-trip latency are verified for the configurations in the measurement record. Long-duration stability and other hardware paths remain to be qualified. Opening the app produces no audio. All routes are disconnected on first launch; subsequent launches restore the last session.
 
 ## Implemented features
 
@@ -44,29 +44,24 @@ A local macOS app and virtual Core Audio driver for freely ordered channels from
 - In either direction, a source can feed multiple destinations. Each destination has at most one source; a new selection replaces its previous connection. There is no summing or mixing. Presets with multiple sources for one destination are rejected, even if some connections are dormant.
 - Channel counts and stored routing are separate. Reducing exposed channel counts makes their connections dormant: they are not sent to the engine and produce no audio. Increasing the counts restores them, including after saving and reopening a preset. The channel list marks dormant output connections. Explicitly selecting a new connection or “Not connected” replaces the previous connection to that destination.
 - Channel-count/rate changes are rejected while the virtual device is in use. Stop routing and disable the DAW audio engine first.
-- The engine uses a private Aggregate Device. The app does not modify the user's existing Aggregate Device or default devices.
+- The Sync Source path uses independent physical callbacks. Private aggregates are used only for secondary interfaces that need Apple drift correction. The app does not modify the user's existing Aggregate Device or default devices.
 - Follow clock master monitors the master's rate and automatically synchronizes other selected physical interfaces when they differ, even without the virtual driver installed. The master is never changed. A failed attempt is followed by three immediate retries, then five seconds between attempts. Status appears in the sidebar. Clearing the checkbox stops further attempts; an ongoing driver call may need to finish. Changing the master or selected interfaces starts a new attempt series. Active routing stops before synchronization and does not restart automatically.
 - Missing channels or failed rate synchronization block startup. Device/format changes during operation silence outputs and stop routing at the next status check.
 
 ## Architecture and latency
 
 ```text
-UFX / ZED inputs → private Core Audio aggregate → routing engine
-    → internal hidden bridge output → capture time buffer → StudioPatch input → Ableton
-
-Ableton → StudioPatch output → playback time buffer
-    → internal hidden bridge input → routing engine → UFX / ZED playback channels
+Sync Source input → physical I/O callback → shared capture timeline → StudioPatch input → DAW
+DAW → StudioPatch output → shared playback timeline → physical I/O callback → Sync Source output
 ```
 
-The driver is an AudioServerPlugIn built with libASPL. The hidden bridge and visible device share a timebase, but capture and playback have separate buffers. Channel counts can therefore differ, and playback is not automatically mixed into recording. No file, network or IPC audio transport connects the app and driver; Core Audio carries audio through the internal bridge.
+The selected Sync Source supplies the sample/host clock. Its path copies native Float32 samples without gain, mixing or resampling. Capture and playback have independent tagged atomic storage; absent or overwritten frames become silence. The panel is independent of the background service. An authenticated launchd broker shares memory between the signed service and the sandboxed AudioServerPlugIn. IPC occurs during configuration, never in an audio callback. The underlying libASPL I/O wrapper still uses its existing mutex; this change does not claim the entire driver stack is lock-free.
 
-This prototype prioritizes a correct channel model and safe behavior over minimum latency. Audio callbacks do not allocate memory or wait on mutexes. Time buffers use atomic samples and return silence for missing or overwritten frames. Buffers are touched during initialization, but memory pages are not yet locked; production hardening remains.
+Other clock-locked interfaces have separate physical callbacks and safety-offset allowances. A secondary device with drift correction enabled uses a private Apple aggregate with Sync Source as its clock reference; only that secondary's routes pass through it. StudioPatch does not implement its own sample-rate converter. The user's existing aggregates and default devices are unchanged.
 
-The transport margin is automatic by default, following the selected I/O buffer with four buffers **per direction**. Current samples and milliseconds per direction are shown at the selected sample rate. Under **Advanced**, automatic mode can be disabled and the margin chosen manually; the manual value is preserved while automatic mode is active. Older sessions without this setting use automatic mode. Defaults are 96 kHz, 64 I/O samples and thus a 256-sample margin, with UFX III preselected as master when present. At 96 kHz, the combined transport margins are 5.33 ms, **in addition to** other signal-path stages. This is a calculation of the selected margin, not measured round-trip latency. The UI allows smaller margins; startup requires at least two actual I/O buffers per direction. For example, 32 I/O samples and a 64-sample margin give a calculated combined transport margin of 1.33 ms at 96 kHz. Stability in this mode is unverified.
+Visible input/output latency is the Sync Source's device + maximum stream latency plus the corresponding StudioPatch margin. Safety offsets match Sync Source and are reported separately. Core Audio configuration changes apply timing updates before startup. At 32-frame engine I/O, margins are 32 input + 32 output frames at 96 kHz, and 32 input + 16 output frames at 48 kHz. Larger engine buffers require a larger capture margin and can exceed the 1 ms target. These are engine buffers; a DAW's 256-frame buffer remains a separate setting. Advanced settings show the current margins. Old preset margin fields are retained for compatibility but no longer control this transport.
 
-UFX and ZED can share an ADAT clock with drift compensation disabled on physical interfaces. In this version, the virtual bridge uses the computer's timebase with Core Audio drift compensation enabled. **The prototype is therefore not guaranteed to be bit-transparent and is not a driver clocked directly by UFX.** A later optimization could tie the virtual clock to hardware timestamps; this requires separate implementation and measurement.
-
-The driver reports its own transport margin but does not yet forward all underlying hardware/aggregate latency to the DAW. Automatic recording compensation may therefore be incorrect. Do not use it for timing-critical recordings before physical loopback measurement and recording-offset verification.
+Other interfaces can have different path latency; global reporting intentionally refers to Sync Source. Independently measured hardware error remains separate. The [measurement record](Docs/LATENCY-DIRECT-2026-10-23.md) distinguishes measured duplex RTL, timestamp-referenced delay and HAL reports, and lists unverified configurations. Brief tests are not a long-duration stability qualification.
 
 ## Build and open
 
@@ -79,24 +74,20 @@ open Dist/StudioPatch.app
 
 The build creates the app, `.driver` and read-only `patch-inspect` tool in `Dist`. It installs nothing. Without the driver, interfaces can be inventoried, matrices edited and presets saved; audio-start controls are disabled.
 
-The build uses local ad hoc signing if `STUDIOPATCH_SIGNING_IDENTITY` is unset. It is not notarized. Passing signature checks does not prove that Core Audio loads the driver. Do not change SIP or macOS security settings to bypass loading errors; investigate logs and signing instead.
+The build requires a persistent certificate-backed identity and never falls back to ad hoc signing. It is not notarized. Passing signature checks does not prove that Core Audio loads the driver. Do not change SIP or macOS security settings to bypass loading errors; investigate logs and signing instead.
 
-## Installation and first hardware test — not yet performed
+## Installation and hardware testing
 
-1. Close audio applications and save ongoing work.
-2. Review `Scripts/install-driver.sh`. It installs only `StudioPatch.driver` in `/Library/Audio/Plug-Ins/HAL` and refuses to overwrite an existing installation. To update, use `sudo ./Scripts/install-driver.sh --replace`; the previous StudioPatch driver is saved under `/Library/Audio/StudioPatch Backups` before replacement. Restart the computer after updating.
-3. Run `sudo ./Scripts/install-driver.sh`, then restart the computer. The script does not restart the audio server automatically.
-4. Verify that **StudioPatch** appears in Audio MIDI Setup. Open the app. Confirm that both physical interfaces show the correct rate and that ADAT is actually locked/synchronized. The app cannot verify ADAT lock for you.
-5. Set the desired input/output counts and rate. Click **Apply channel counts** while the DAW audio engine is off. Then select StudioPatch as both input and output in Ableton. Channel changes may require updating Ableton's Input/Output Config.
-6. Select both interfaces, the correct clock master and your routes. Leave drift compensation off on ADAT-synchronized interfaces. **Follow clock master** reads the master's rate and sets other selected interfaces to match. The app first checks support, writability and whether another application is using the interface. An asynchronous change must be confirmed within two seconds per interface. There is no manual sync button; mismatches are detected by the inventory every two seconds and synchronized in the background. Check channel selections afterward: some channels may disappear at higher rates. If a change partially fails, some interfaces may already have switched; an error is shown and there is no automatic rollback. The app does not change clock sources or ADAT lock.
-7. Start with one low-level signal and a larger transport margin. Grant microphone access if macOS asks. Click **Start routing**. The app generates no startup signal.
-8. Test recording and playback separately, then together. Verify that playback is not heard on recording channels without intentional external routing.
-9. Measure a physical output→input loopback with both direct RME and StudioPatch at identical rates and buffers. The difference measures added latency. Also check the DAW recording offset.
-10. Reduce margin and buffer gradually; then run for at least 30 minutes, checking glitches, disconnection, stop/start and reopening Ableton.
+1. Save work and close audio applications before replacing the system driver.
+2. Run `sudo bash Scripts/install-transport.sh` to install the signed shared-memory broker and its service signing requirement. Review the script first; it creates the `se.studiopatch.transport` LaunchDaemon.
+3. Run `sudo bash Scripts/install-driver.sh --replace` for an update, or omit `--replace` for the first installation. Previous drivers are preserved under `/Library/Audio/StudioPatch Backups`. Restart macOS to load the new driver; installation does not restart Core Audio automatically.
+4. Register the background service with `bash Scripts/install-service.sh` as your normal user. See [BACKGROUND-RUNTIME.md](BACKGROUND-RUNTIME.md). Open the app and grant microphone access when requested.
+5. Select physical interfaces, Sync Source and routes. Leave drift correction off only when interfaces share a hardware clock; StudioPatch cannot verify an external ADAT lock. The service automatically applies routing and rate changes.
+6. Select StudioPatch in the DAW and test input/output separately. Compare a physical loopback against direct Sync Source at the same sample rate and DAW/client buffer. Preserve hardware correction separately from StudioPatch delay.
 
 UFX outputs in the app are its **software playback channels**. TotalMix still determines how they reach physical outputs. ZED return selections are also controlled by the mixer's own settings.
 
-To uninstall, close audio applications, run `sudo ./Scripts/uninstall-driver.sh` and restart. The script removes only a bundle with identifier `se.studiopatch.driver`.
+To uninstall, close audio applications, run `sudo ./Scripts/uninstall-driver.sh` and restart. The script removes the identified StudioPatch driver and its transport broker, preserving user presets and backups.
 
 ## Tests and remaining work
 

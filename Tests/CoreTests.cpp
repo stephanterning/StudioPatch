@@ -208,7 +208,7 @@ static void testLiveConfiguration() {
     aspl::StreamParameters p; p.Format.mChannelsPerFrame=1;
     auto stream=std::make_shared<aspl::Stream>(context,device,p);
     float sample=1,output=1;
-    back.OnWriteMixedOutput(stream,0,100,&sample,4);
+    front.OnWriteMixedOutput(stream,0,100,&sample,4);
     session->ready.store(false);
     front.OnReadClientInput({},stream,0,164,&output,4);
     assert(output==0); // No old ring audio during format changes or failures.
@@ -242,7 +242,55 @@ static void testInitializeAndRejectedChanges() {
     context->Host=nullptr;
 }
 
+static void testLatencyReporting() {
+    using namespace patch;
+    for(double frame:{2000.25,50000.75,TimingPeriod+2000.5}) {
+        float a,b;encodeTiming(frame,a,b);double decoded;
+        assert(decodeTiming(a,b,frame+1000,decoded));assert(std::abs(decoded-frame)<0.07);
+    }
+    double decoded;assert(!decodeTiming(0,0,1000,decoded));
+    float a,b;encodeTiming(TimingPeriod-1,a,b);assert(!decodeTiming(a,b,TimingPeriod,decoded));
+    auto context=std::make_shared<aspl::Context>(std::make_shared<aspl::Tracer>(aspl::Tracer::Mode::Noop));
+    auto session=std::make_shared<Session>(Config::parse("1 1 1 96000 64"));
+    auto back=endpoint(context,session,true);
+    auto stream=back->GetStreamByID(back->GetStreamIDs(kAudioObjectPropertyScopeOutput)[0]);
+    float block[]{0.25f,0,0};encodeTiming(5000,block[1],block[2]);
+    back->GetIOHandler()->OnWriteMixedOutput(stream,0,5400,block,sizeof(block));
+    assert(std::abs(session->captureDelay.load()-464)<0.1);
+    auto plugin=std::make_shared<PatchPlugin>(context);
+    AudioObjectPropertyAddress timing{TimingProperty,kAudioObjectPropertyScopeGlobal,0};
+    CFStringRef wire=nullptr;UInt32 size=0;
+    assert(plugin->GetPropertyData(plugin->GetID(),0,&timing,0,nullptr,sizeof(wire),&size,&wire)==noErr);
+    char text[256];assert(CFStringGetCString(wire,text,sizeof(text),kCFStringEncodingUTF8));CFRelease(wire);
+    uint64_t anchor;std::istringstream(text)>>anchor;
+    AudioObjectPropertyAddress report{LatencyProperty,kAudioObjectPropertyScopeGlobal,0};
+    auto set=[&](std::string payload) {
+        CFStringRef value=CFStringCreateWithCString(nullptr,payload.c_str(),kCFStringEncodingUTF8);
+        auto result=plugin->SetPropertyData(plugin->GetID(),0,&report,0,nullptr,sizeof(value),&value);CFRelease(value);return result;
+    };
+    assert(set(std::to_string(anchor)+" 700 624")==noErr);
+    auto device=plugin->GetDeviceByIndex(0);
+    for(bool input:{true,false}) {
+        AudioObjectPropertyAddress a{kAudioDevicePropertyLatency,input?kAudioObjectPropertyScopeInput:kAudioObjectPropertyScopeOutput,0};
+        UInt32 result=0;
+        assert(device->GetPropertyData(device->GetID(),0,&a,0,nullptr,sizeof(result),&size,&result)==noErr);
+        assert(result==(input?700:624));
+        auto stream=device->GetStreamByID(device->GetStreamIDs(a.mScope)[0]);assert(stream->GetLatency()==0);
+    }
+    assert(set(std::to_string(anchor+1)+" 700 624")!=noErr);
+    assert(set(std::to_string(anchor)+" 56 60 48 24")==noErr);
+    for(bool input:{true,false}) {
+        AudioObjectPropertyAddress a{kAudioDevicePropertySafetyOffset,input?kAudioObjectPropertyScopeInput:kAudioObjectPropertyScopeOutput,0};
+        UInt32 result=0;
+        assert(device->GetPropertyData(device->GetID(),0,&a,0,nullptr,sizeof(result),&size,&result)==noErr);
+        assert(result==(input?48:24));
+    }
+    assert(set(std::to_string(anchor)+" 999999 624")!=noErr);
+    assert(set(std::to_string(anchor)+" 700 624 trailing")!=noErr);
+}
+
 int main() {
+    testLatencyReporting();
     testInitializeAndRejectedChanges();
     testLiveConfiguration();
     testStreamNotificationsDoNotBlockSetter();
@@ -279,8 +327,8 @@ int main() {
     assert(inStream.size() == 1 && outStream.size() == 1);
     assert(visible->GetStreamByID(inStream[0])->GetChannelCount() == 3);
     assert(visible->GetStreamByID(outStream[0])->GetChannelCount() == 5);
-    assert(bridge->GetStreamByID(bridge->GetStreamIDs(kAudioObjectPropertyScopeInput)[0])->GetChannelCount() == 5);
-    assert(bridge->GetStreamByID(bridge->GetStreamIDs(kAudioObjectPropertyScopeOutput)[0])->GetChannelCount() == 3);
+    assert(bridge->GetStreamByID(bridge->GetStreamIDs(kAudioObjectPropertyScopeInput)[0])->GetChannelCount() == 7);
+    assert(bridge->GetStreamByID(bridge->GetStreamIDs(kAudioObjectPropertyScopeOutput)[0])->GetChannelCount() == 5);
     assert(visible->GetControlHandler()->OnStartIO() == noErr);
     assert(plugin->configure(Config::parse("1 37 21 48000 64"), false) == noErr);
     assert(plugin->GetDeviceByIndex(0)->GetID() == visible->GetID());
@@ -298,13 +346,16 @@ int main() {
     Handler front(s, false), back(s, true);
     front.OnReadClientInput({}, stream3, 0, 164, output, sizeof(output));
     for (float v : output) assert(v == 0);
-    back.OnWriteMixedOutput(stream3, 0, 100, input, sizeof(input));
+    auto bridgeCapture=b->GetStreamByID(b->GetStreamIDs(kAudioObjectPropertyScopeOutput)[0]);
+    float markedInput[]{input[0],input[1],input[2],0,0,input[3],input[4],input[5],0,0};
+    back.OnWriteMixedOutput(bridgeCapture, 0, 100, markedInput, sizeof(markedInput));
     front.OnReadClientInput({}, stream3, 0, 164, output, sizeof(output));
     assert(std::memcmp(input, output, sizeof(input)) == 0);
-    float playback[]{1, 2, 3, 4, 5}, got[5]{};
+    float playback[]{1, 2, 3, 4, 5}, got[7]{};
     front.OnWriteMixedOutput(stream5, 0, 300, playback, sizeof(playback));
-    back.OnReadClientInput({}, stream5, 0, 364, got, sizeof(got));
-    assert(std::memcmp(playback, got, sizeof(got)) == 0);
+    auto bridgePlayback=b->GetStreamByID(b->GetStreamIDs(kAudioObjectPropertyScopeInput)[0]);
+    back.OnReadClientInput({}, bridgePlayback, 0, 364, got, sizeof(got));
+    assert(std::memcmp(playback, got, sizeof(playback)) == 0);
     // Playback must never leak into capture.
     front.OnReadClientInput({}, stream3, 0, 364, output, 3*sizeof(float));
     assert(output[0] == 0 && output[1] == 0 && output[2] == 0);

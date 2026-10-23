@@ -1,10 +1,13 @@
 #include "Bridge.h"
 #include "Core.hpp"
+#include "Latency.hpp"
+#include "SharedTransport.hpp"
 #include "ChannelNames.hpp"
 #include "RateSync.hpp"
 #include "RateWire.hpp"
 #import <Foundation/Foundation.h>
 #include <CoreAudio/CoreAudio.h>
+#include <mach/mach_time.h>
 #include <algorithm>
 #include <map>
 #include <mutex>
@@ -105,19 +108,51 @@ std::vector<Channel> channels(const std::vector<UInt32>& l) {
 }
 struct Route { Channel source,dest; };
 struct Watch { AudioObjectID id; AudioObjectPropertyAddress addr; };
-class Engine {
+class LegacyEngine {
 public:
     AudioDeviceID aggregate=0;
     AudioDeviceIOProcID proc=nullptr;
     std::atomic<bool> invalidated{false};
     std::atomic<uint64_t> cycles{0}, badBuffers{0};
+    // Timestamp diagnostics only; never call HAL or allocate in the audio callback.
+    std::atomic<int64_t> ioTimestampGap{-1};
+    std::atomic<uint32_t> callbackFrames{0};
     std::vector<UInt32> inLayout,outLayout;
     std::vector<Route> routes;
     std::vector<Watch> watches;
     uint32_t actualBuffer=0;
-    ~Engine() { stop(); }
+    uint64_t timingAnchor=0;
+    double ticksPerFrame=0;
+    Channel timingInput[2]{},timingOutput[2]{};
+    std::atomic<double> playbackDelay{-1};
+    AudioDeviceID syncSource=0;
+    uint32_t lastInputLatency=UINT32_MAX,lastOutputLatency=UINT32_MAX;
+    void publishLatency() {
+        if(invalidated.load())return;
+        auto timing=stringProperty(pluginID(),patch::TimingProperty);
+        uint64_t generation; double ticks,capture;
+        std::istringstream values(timing.UTF8String ?: "");
+        if(!(values>>generation>>ticks>>capture) || generation!=timingAnchor || capture<0)return;
+        const auto playback=playbackDelay.load();if(playback<0)return;
+        auto hardwareLatency=[&](bool input) {
+            auto scope=input?kAudioObjectPropertyScopeInput:kAudioObjectPropertyScopeOutput;
+            UInt32 streamLatency=0;
+            for(auto stream:list<AudioStreamID>(syncSource,kAudioDevicePropertyStreams,scope))
+                streamLatency=std::max(streamLatency,get<UInt32>(stream,kAudioStreamPropertyLatency));
+            return uint64_t(get<UInt32>(syncSource,kAudioDevicePropertyLatency,scope))+streamLatency;
+        };
+        auto in=uint32_t(std::llround(capture)+hardwareLatency(true));
+        auto out=uint32_t(std::llround(playback)+hardwareLatency(false));
+        if(in==lastInputLatency && out==lastOutputLatency)return;
+        auto text=std::to_string(timingAnchor)+" "+std::to_string(in)+" "+std::to_string(out);
+        CFStringRef value=CFStringCreateWithCString(nullptr,text.c_str(),kCFStringEncodingUTF8);
+        auto a=address(patch::LatencyProperty);
+        auto status=AudioObjectSetPropertyData(pluginID(),&a,0,nullptr,sizeof(value),&value);CFRelease(value);
+        check(status,"Publish latency report");lastInputLatency=in;lastOutputLatency=out;
+    }
+    ~LegacyEngine() { stop(); }
     static OSStatus changed(AudioObjectID,UInt32,const AudioObjectPropertyAddress*,void* p) {
-        static_cast<Engine*>(p)->invalidated.store(true); return noErr;
+        static_cast<LegacyEngine*>(p)->invalidated.store(true); return noErr;
     }
     void watch(AudioObjectID id,AudioObjectPropertySelector key,AudioObjectPropertyScope scope=kAudioObjectPropertyScopeGlobal) {
         auto a=address(key,scope);
@@ -132,8 +167,8 @@ public:
         if (aggregate) { AudioHardwareDestroyAggregateDevice(aggregate); aggregate=0; }
     }
     static OSStatus io(AudioDeviceID,const AudioTimeStamp*,const AudioBufferList* input,
-        const AudioTimeStamp*,AudioBufferList* output,const AudioTimeStamp*,void* p) {
-        auto& e=*static_cast<Engine*>(p);
+        const AudioTimeStamp* inputTime,AudioBufferList* output,const AudioTimeStamp* outputTime,void* p) {
+        auto& e=*static_cast<LegacyEngine*>(p);
         if (output) for(UInt32 b=0;b<output->mNumberBuffers;++b)
             if(output->mBuffers[b].mData) memset(output->mBuffers[b].mData,0,output->mBuffers[b].mDataByteSize);
         if (e.invalidated.load(std::memory_order_relaxed)) return noErr;
@@ -154,10 +189,30 @@ public:
                 if(n!=frames) { e.badBuffers.fetch_add(1); e.invalidated.store(true); return noErr; }
             }
         }
+        if(inputTime && outputTime &&
+            (inputTime->mFlags & kAudioTimeStampSampleTimeValid) &&
+            (outputTime->mFlags & kAudioTimeStampSampleTimeValid))
+            e.ioTimestampGap.store(int64_t(std::llround(outputTime->mSampleTime-inputTime->mSampleTime)),std::memory_order_relaxed);
+        e.callbackFrames.store(frames,std::memory_order_relaxed);
         for(const auto& route:e.routes) {
             const float* src=static_cast<const float*>(input->mBuffers[route.source.buffer].mData)+route.source.channel;
             float* dst=static_cast<float*>(output->mBuffers[route.dest.buffer].mData)+route.dest.channel;
             for(uint32_t f=0;f<frames;++f) dst[size_t(f)*route.dest.stride]=src[size_t(f)*route.source.stride];
+        }
+        if(inputTime && outputTime && (inputTime->mFlags&kAudioTimeStampHostTimeValid) &&
+            (outputTime->mFlags&kAudioTimeStampHostTimeValid)) {
+            const double inFrame=(double(inputTime->mHostTime)-double(e.timingAnchor))/e.ticksPerFrame;
+            const double outFrame=(double(outputTime->mHostTime)-double(e.timingAnchor))/e.ticksPerFrame;
+            auto& ia=e.timingInput[0];auto& ib=e.timingInput[1];
+            auto& oa=e.timingOutput[0];auto& ob=e.timingOutput[1];
+            auto a=static_cast<const float*>(input->mBuffers[ia.buffer].mData)+ia.channel;
+            auto b=static_cast<const float*>(input->mBuffers[ib.buffer].mData)+ib.channel;
+            auto x=static_cast<float*>(output->mBuffers[oa.buffer].mData)+oa.channel;
+            auto y=static_cast<float*>(output->mBuffers[ob.buffer].mData)+ob.channel;
+            for(uint32_t n=0;n<frames;++n)patch::encodeTiming(inFrame+n,x[n*oa.stride],y[n*ob.stride]);
+            auto n=frames/2;double source,delay;
+            if(patch::decodeTiming(a[n*ia.stride],b[n*ib.stride],outFrame+n,source) &&
+                patch::timingDelay(outFrame+n,source,delay)) e.playbackDelay.store(delay,std::memory_order_relaxed);
         }
         e.cycles.fetch_add(1,std::memory_order_relaxed);
         return noErr;
@@ -165,6 +220,10 @@ public:
     void start(NSDictionary* d) {
         const auto c=config(d);
         if (currentConfig()!=c.encode()) throw std::runtime_error("Apply channel counts first, then reselect StudioPatch in the audio application.");
+        auto timing=stringProperty(pluginID(),patch::TimingProperty);
+        std::istringstream clock(timing.UTF8String ?: "");double previousDelay;
+        if(!(clock>>timingAnchor>>ticksPerFrame>>previousDelay) || ticksPerFrame<=0)
+            throw std::runtime_error("Install the latency-reporting driver before starting this service.");
         const auto buffer=[d[@"bufferFrames"] unsignedIntValue];
         if(buffer<32 || buffer>1024 || (buffer&(buffer-1))) throw std::runtime_error("Invalid buffer size");
         if(c.delay<buffer*2) throw std::runtime_error("The transport margin must be at least two I/O buffers.");
@@ -201,10 +260,11 @@ public:
                 @kAudioSubDeviceDriftCompensationKey:@(!primary && [member[@"drift"] boolValue])}];
         }
         if(!haveMaster) throw std::runtime_error("The sync source must be one of the selected interfaces.");
+        syncSource=translate(master);
         const auto bridgeInputOffset=ins,bridgeOutputOffset=outs;
         if(!translate(@(patch::BridgeUID))) throw std::runtime_error("Internal bridge is unavailable");
         [subs addObject:@{@kAudioSubDeviceUIDKey:@(patch::BridgeUID),@kAudioSubDeviceDriftCompensationKey:@YES}];
-        NSDictionary* desc=@{@kAudioAggregateDeviceNameKey:@"StudioPatch Engine",
+        NSDictionary* desc=@{@kAudioAggregateDeviceNameKey:@"StudioPatch LegacyEngine",
             @kAudioAggregateDeviceUIDKey:[@"se.studiopatch.engine." stringByAppendingString:NSUUID.UUID.UUIDString],
             @kAudioAggregateDeviceIsPrivateKey:@YES,@kAudioAggregateDeviceIsStackedKey:@NO,
             @kAudioAggregateDeviceMainSubDeviceKey:master,@kAudioAggregateDeviceSubDeviceListKey:subs};
@@ -215,10 +275,10 @@ public:
         for(int attempt=0;attempt<40;++attempt) {
             inLayout=layout(aggregate,kAudioObjectPropertyScopeInput);
             outLayout=layout(aggregate,kAudioObjectPropertyScopeOutput);
-            if(total(inLayout)==ins+c.outputs && total(outLayout)==outs+c.inputs) break;
+            if(total(inLayout)==ins+c.outputs+patch::TimingChannels && total(outLayout)==outs+c.inputs+patch::TimingChannels) break;
             std::this_thread::sleep_for(std::chrono::milliseconds(25));
         }
-        if(total(inLayout)!=ins+c.outputs || total(outLayout)!=outs+c.inputs)
+        if(total(inLayout)!=ins+c.outputs+patch::TimingChannels || total(outLayout)!=outs+c.inputs+patch::TimingChannels)
             throw std::runtime_error("Aggregate channel layout did not match; no routing was started");
         CFArrayRef full=get<CFArrayRef>(aggregate,kAudioAggregateDevicePropertyFullSubDeviceList);
         NSArray* actual=CFBridgingRelease(full);
@@ -231,10 +291,14 @@ public:
                 auto f=get<AudioStreamBasicDescription>(stream,kAudioStreamPropertyVirtualFormat);
                 if(f.mFormatID!=kAudioFormatLinearPCM || !(f.mFormatFlags&kAudioFormatFlagIsFloat) ||
                     f.mBitsPerChannel!=32 || std::abs(f.mSampleRate-c.rate)>0.1)
-                    throw std::runtime_error("Engine requires native Float32 PCM at the selected sample rate");
+                    throw std::runtime_error("LegacyEngine requires native Float32 PCM at the selected sample rate");
             }
         }
         const auto inputChannels=channels(inLayout),outputChannels=channels(outLayout);
+        for(unsigned n=0;n<patch::TimingChannels;++n) {
+            timingInput[n]=inputChannels.at(bridgeInputOffset+c.outputs+n);
+            timingOutput[n]=outputChannels.at(bridgeOutputOffset+c.inputs+n);
+        }
         std::set<uint32_t> usedOutputs;
         NSArray* captures=d[@"inputs"], *playbacks=d[@"outputs"];
         if(![captures isKindOfClass:[NSArray class]] || captures.count!=c.inputs ||
@@ -276,8 +340,26 @@ public:
         check(AudioDeviceStart(aggregate,proc),"Start audio; allow microphone access if macOS requests it");
     }
 };
+#include "DirectEngine.hpp"
+using Engine=DirectEngine;
 std::mutex control;
 std::unique_ptr<Engine> engine;
+void startLatencyUpdates() {
+    static dispatch_once_t once;
+    dispatch_once(&once,^{
+        // Independent of the two-second UI inventory timer. Property publication
+        // stays off the audio thread and follows slow bridge clock drift.
+        auto queue=dispatch_queue_create("se.studiopatch.latency",DISPATCH_QUEUE_SERIAL);
+        static dispatch_source_t timer;
+        timer=dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER,0,0,queue);
+        dispatch_source_set_timer(timer,dispatch_time(DISPATCH_TIME_NOW,100*NSEC_PER_MSEC),100*NSEC_PER_MSEC,10*NSEC_PER_MSEC);
+        dispatch_source_set_event_handler(timer,^{
+            std::lock_guard lock(control);
+            if(engine)try {engine->publishLatency();}catch(const std::exception&) {}
+        });
+        dispatch_resume(timer);
+    });
+}
 }
 
 extern "C" char* SPInventory() { @autoreleasepool {
@@ -437,14 +519,24 @@ extern "C" char* SPStart(const char* raw) { @autoreleasepool {
     try {
         if(engine) throw std::runtime_error("Routing is already active");
         auto next=std::make_unique<Engine>(); next->start(json(raw)); engine=std::move(next);
+        startLatencyUpdates();
         return response(@{@"ok":@YES});
     } catch(const std::exception& e) { return failure(e); }
 } }
 extern "C" char* SPStatus() { @autoreleasepool {
     std::lock_guard lock(control);
+    NSString* diagnostics=@"unavailable";
+    if(engine)try {
+        engine->publishLatency();auto& state=*engine->memory->data;
+        auto values=@{@"transport":@"direct shared memory",@"bufferFrames":@(engine->actualBuffer),
+            @"inputPadding":@(state.inputPadding),@"outputPadding":@(state.padding),@"captureMisses":@(state.captureMisses.load()),
+            @"playbackMisses":@(state.playbackMisses.load()),@"reportedLatency":stringProperty(pluginID(),patch::LatencyProperty),
+            @"inputSafety":@(engine->masterInputSafety),@"outputSafety":@(engine->masterOutputSafety)};
+        diagnostics=[[NSString alloc] initWithData:[NSJSONSerialization dataWithJSONObject:values options:0 error:nil] encoding:NSUTF8StringEncoding];
+    }catch(const std::exception& e){diagnostics=[@"unavailable: " stringByAppendingString:@(e.what())];}
     return response(@{@"running":@(engine!=nullptr),@"invalidated":@(engine && engine->invalidated.load()),
         @"cycles":@(engine?engine->cycles.load():0),@"badBuffers":@(engine?engine->badBuffers.load():0),
-        @"bufferFrames":@(engine?engine->actualBuffer:0)});
+        @"latencyDiagnostics":diagnostics ?: @"unavailable",@"bufferFrames":@(engine?engine->actualBuffer:0)});
 } }
 extern "C" void SPStop() { std::lock_guard lock(control); engine.reset(); }
 extern "C" void SPFree(char* s) { free(s); }

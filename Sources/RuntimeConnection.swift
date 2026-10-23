@@ -10,6 +10,7 @@ struct RuntimeSnapshot: Codable {
     var running: Bool
     var message: String
     var rate: Int
+    var latencyDiagnostics: String? = nil
 }
 enum RuntimeConnection {
     static let directory:URL = ProcessInfo.processInfo.environment["STUDIOPATCH_TEST_DIRECTORY"].map { URL(fileURLWithPath:$0) } ?? FileManager.default.urls(for:.applicationSupportDirectory,in:.userDomainMask)[0].appendingPathComponent("StudioPatch")

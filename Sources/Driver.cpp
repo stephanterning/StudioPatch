@@ -1,4 +1,6 @@
 #include "Core.hpp"
+#include "Latency.hpp"
+#include "SharedTransport.hpp"
 #include "ChannelNames.hpp"
 #include <aspl/Driver.hpp>
 #include <aspl/HostCallbacks.hpp>
@@ -16,8 +18,13 @@ struct Session {
     double ticksPerFrame;
     std::mutex control;
     uint32_t active = 0;
+    std::atomic<double> captureDelay{-1};
+    std::atomic<uint32_t> inputLatency{0}, outputLatency{0};
+    std::atomic<uint32_t> inputSafety{0}, outputSafety{0};
+    const std::shared_ptr<SharedMapping> direct;
     bool retired = false;
-    explicit Session(Config c) : config(c), capture(c.inputs), playback(c.outputs) {
+    explicit Session(Config c,bool useDirect=false) : config(c), capture(c.inputs), playback(c.outputs),
+        direct(useDirect?SharedMapping::connect(anchor,c,true):nullptr) {
         mach_timebase_info_data_t tb; mach_timebase_info(&tb);
         ticksPerFrame = 1e9 * double(tb.denom) / tb.numer / c.rate;
     }
@@ -42,18 +49,51 @@ public:
         const std::shared_ptr<aspl::Stream>& stream, Float64, Float64 time,
         void* data, UInt32 size) override {
         if (!session_->ready.load()) { memset(data,0,size); return; }
+        if(session_->direct && !bridge_) {
+            auto& shared=*session_->direct->data;auto count=session_->config.inputs;
+            if(!shared.alive(mach_absolute_time()) || !count || size%(count*4)){memset(data,0,size);return;}
+            auto dest=static_cast<float*>(data);auto start=int64_t(std::llround(time))-shared.inputPadding;
+            for(uint32_t n=0;n<size/4/count;++n)for(uint32_t c=0;c<count;++c) {
+                bool found;dest[n*count+c]=shared.capture.read(c,start+n,&found);
+                if(!found)shared.captureMisses.fetch_add(1,std::memory_order_relaxed);
+            }
+            return;
+        }
         auto& ring = bridge_ ? session_->playback : session_->capture;
         const auto channels = stream->GetChannelCount();
-        if (channels) ring.read(int64_t(std::llround(time)) - session_->config.delay,
-            static_cast<float*>(data), size / sizeof(float) / channels);
+        const auto expected=bridge_?session_->config.outputs+TimingChannels:session_->config.inputs;
+        if(!channels || channels!=expected || size%(channels*sizeof(float))) {memset(data,0,size);return;}
+        if (channels) {
+            auto samples=static_cast<float*>(data); const auto count=size/sizeof(float)/channels;
+            ring.read(int64_t(std::llround(time))-session_->config.delay,samples,count,channels);
+            if(bridge_) for(uint32_t n=0;n<count;++n)
+                encodeTiming(time+n-session_->config.delay,samples[n*channels+channels-2],samples[n*channels+channels-1]);
+        }
     }
     void OnWriteMixedOutput(const std::shared_ptr<aspl::Stream>& stream,
         Float64, Float64 time, const void* data, UInt32 size) override {
         if (!session_->ready.load()) return;
+        if(session_->direct && !bridge_) {
+            auto& shared=*session_->direct->data;auto count=session_->config.outputs;
+            if(!shared.alive(mach_absolute_time()) || !count || size%(count*4))return;
+            auto source=static_cast<const float*>(data);auto start=int64_t(std::llround(time));
+            for(uint32_t n=0;n<size/4/count;++n)for(uint32_t c=0;c<count;++c)shared.playback.write(c,start+n,source[n*count+c]);
+            return;
+        }
         auto& ring = bridge_ ? session_->capture : session_->playback;
         const auto channels = stream->GetChannelCount();
-        if (channels) ring.write(int64_t(std::llround(time)),
-            static_cast<const float*>(data), size / sizeof(float) / channels);
+        const auto expected=bridge_?session_->config.inputs+TimingChannels:session_->config.outputs;
+        if(!channels || channels!=expected || size%(channels*sizeof(float)))return;
+        if (channels) {
+            auto samples=static_cast<const float*>(data);const auto count=size/sizeof(float)/channels;
+            ring.write(int64_t(std::llround(time)),samples,count,channels);
+            if(bridge_ && count) {
+                double source,delay;auto n=count/2;
+                if(decodeTiming(samples[n*channels+channels-2],samples[n*channels+channels-1],time+n,source) &&
+                    timingDelay(time+n+session_->config.delay,source,delay))
+                    session_->captureDelay.store(delay,std::memory_order_relaxed);
+            }
+        }
     }
 };
 
@@ -86,6 +126,10 @@ class Endpoint final : public aspl::Device {
         return (a->mScope == kAudioObjectPropertyScopeInput && a->mElement <= std::atomic_load(&session_)->config.inputs) ||
             (a->mScope == kAudioObjectPropertyScopeOutput && a->mElement <= std::atomic_load(&session_)->config.outputs);
     }
+    bool isLatency(const AudioObjectPropertyAddress* a) const {
+        return exposed_ && a && (a->mSelector==kAudioDevicePropertyLatency || a->mSelector==kAudioDevicePropertySafetyOffset) &&
+            (a->mScope==kAudioObjectPropertyScopeInput || a->mScope==kAudioObjectPropertyScopeOutput);
+    }
 public:
     Endpoint(std::shared_ptr<const aspl::Context> context, const aspl::DeviceParameters& p,
         std::shared_ptr<Session> s, bool exposed) : aspl::Device(context, p), session_(std::move(s)), exposed_(exposed) {}
@@ -102,6 +146,19 @@ public:
         }
     }
     void onRateRequest(std::function<void(double)> callback) { rateRequest_=std::move(callback); }
+    void publishTiming(std::shared_ptr<Session> session,uint32_t in,uint32_t out,uint32_t si,uint32_t so) {
+        auto self=std::static_pointer_cast<Endpoint>(shared_from_this());
+        RequestConfigurationChange([self,session,in,out,si,so] {
+            if(std::atomic_load(&self->session_)!=session)return;
+            session->inputLatency=in;session->outputLatency=out;
+            session->inputSafety=si;session->outputSafety=so;
+            self->SetSafetyOffsetImpl(std::max(si,so));
+            for(auto scope:{kAudioObjectPropertyScopeInput,kAudioObjectPropertyScopeOutput}) {
+                self->NotifyPropertyChanged(kAudioDevicePropertyLatency,scope);
+                self->NotifyPropertyChanged(kAudioDevicePropertySafetyOffset,scope);
+            }
+        });
+    }
     void replaceSession(std::shared_ptr<Session> next, std::function<void()> completed, std::function<void()> aborted) {
         abort_=std::move(aborted);
         auto self=std::static_pointer_cast<Endpoint>(shared_from_this());
@@ -110,15 +167,16 @@ public:
             for (auto scope : {kAudioObjectPropertyScopeInput,kAudioObjectPropertyScopeOutput})
                 for(auto id:self->GetStreamIDs(scope)) self->RemoveStreamAsync(self->GetStreamByID(id));
             std::atomic_store(&self->session_,next);
-            self->SetPreferredChannelCountAsync(std::max(next->config.inputs,next->config.outputs));
+            self->SetPreferredChannelCountAsync(std::max(next->config.inputs,next->config.outputs)+(self->exposed_?0:TimingChannels));
             self->SetNominalSampleRateImpl(next->config.rate);
             self->NotifyPropertyChanged(kAudioDevicePropertyNominalSampleRate);
             for(bool input:{true,false}) {
                 auto channels=(input==self->exposed_) ? next->config.inputs : next->config.outputs;
+                if(!self->exposed_)channels+=TimingChannels;
                 if(!channels) continue;
                 aspl::StreamParameters sp;
                 sp.Direction=input ? aspl::Direction::Input : aspl::Direction::Output;
-                sp.Latency=input ? next->config.delay : 0;
+                sp.Latency=(!self->exposed_ && input) ? next->config.delay : 0;
                 sp.Format={double(next->config.rate),kAudioFormatLinearPCM,kAudioFormatFlagsNativeFloatPacked,
                     channels*4,1,channels*4,channels,32,0};
                 self->AddStreamAsync(std::make_shared<RoutedStream>(self->GetContext(),self,sp));
@@ -168,6 +226,14 @@ public:
     }
     OSStatus GetPropertyData(AudioObjectID id, pid_t pid, const AudioObjectPropertyAddress* a,
         UInt32 qs, const void* q, UInt32 size, UInt32* written, void* data) const override {
+        if(isLatency(a)) {
+            if(!data || !written || size<sizeof(UInt32))return kAudioHardwareBadPropertySizeError;
+            auto s=std::atomic_load(&session_);
+            const bool input=a->mScope==kAudioObjectPropertyScopeInput;
+            *static_cast<UInt32*>(data)=a->mSelector==kAudioDevicePropertyLatency?
+                (input?s->inputLatency.load():s->outputLatency.load()):(input?s->inputSafety.load():s->outputSafety.load());
+            *written=sizeof(UInt32);return noErr;
+        }
         if (!isChannelName(a)) return aspl::Device::GetPropertyData(id,pid,a,qs,q,size,written,data);
         if (!data || !written || size < sizeof(CFStringRef)) return kAudioHardwareBadPropertySizeError;
         auto name=channelName(a->mScope == kAudioObjectPropertyScopeInput,a->mElement);
@@ -191,6 +257,13 @@ protected:
         // Both endpoints share a clock and epoch, including when clients start separately.
         const auto session = std::atomic_load(&session_);
         const uint64_t now = mach_absolute_time();
+        ClockSample hardware;
+        if(session->direct && session->direct->data->clock(hardware)) {
+            auto current=hardware.sample+(double(now)-double(hardware.host))/hardware.ticks;
+            *sample=std::floor(current/RingFrames)*RingFrames;
+            *host=uint64_t(double(hardware.host)+(*sample-hardware.sample)*hardware.ticks);
+            *seed=session->anchor+1;return noErr;
+        }
         const double periods = std::floor(double(now - session->anchor) /
             session->ticksPerFrame / double(RingFrames));
         *sample = periods * double(RingFrames);
@@ -209,7 +282,7 @@ std::shared_ptr<Endpoint> endpoint(std::shared_ptr<const aspl::Context> context,
     p.ModelUID = "se.studiopatch.model.v1";
     p.ConfigurationApplicationBundleID = "se.studiopatch.app";
     p.SampleRate = s->config.rate;
-    p.ChannelCount = std::max(s->config.inputs, s->config.outputs);
+    p.ChannelCount = std::max(s->config.inputs, s->config.outputs)+(bridge?TimingChannels:0);
     p.CanBeDefault = !bridge;
     p.CanBeDefaultForSystemSounds = false;
     // HAL derives its allowed client buffer range from this period.
@@ -221,11 +294,11 @@ std::shared_ptr<Endpoint> endpoint(std::shared_ptr<const aspl::Context> context,
     auto d = std::make_shared<Endpoint>(context, p, s, !bridge);
     d->SetIsHidden(bridge);
     for (bool input : {true, false}) {
-        const auto channels = (input != bridge) ? s->config.inputs : s->config.outputs;
+        const auto channels = ((input != bridge) ? s->config.inputs : s->config.outputs)+(bridge?TimingChannels:0);
         if (!channels) continue;
         aspl::StreamParameters sp;
         sp.Direction = input ? aspl::Direction::Input : aspl::Direction::Output;
-        sp.Latency = input ? s->config.delay : 0;
+        sp.Latency = bridge && input ? s->config.delay : 0;
         sp.Format = {double(s->config.rate), kAudioFormatLinearPCM,
             kAudioFormatFlagsNativeFloatPacked, channels * 4, 1, channels * 4, channels, 32, 0};
         d->AddStreamAsync(std::make_shared<RoutedStream>(context,d,sp));
@@ -244,12 +317,29 @@ class PatchPlugin final : public aspl::Plugin {
     ChannelNames names_;
     std::atomic<double> requestedRate_{0};
     std::atomic<bool> configuring_{false};
+    bool direct_=false;
 public:
+    void enableDirect(){direct_=true;}
     explicit PatchPlugin(std::shared_ptr<aspl::Context> context)
         : aspl::Plugin(context), context_(context) {
         RegisterCustomProperty(ConfigProperty, [this]() -> CFStringRef {
             std::lock_guard lock(mutex_);
             return CFStringCreateWithCString(nullptr, session_->config.encode().c_str(), kCFStringEncodingUTF8);
+        });
+        RegisterCustomProperty(TimingProperty,[this]() -> CFStringRef {
+            std::lock_guard lock(mutex_);
+            auto text=std::to_string(session_->anchor)+" "+std::to_string(session_->ticksPerFrame)+" "+
+                std::to_string(session_->captureDelay.load());
+            return CFStringCreateWithCString(nullptr,text.c_str(),kCFStringEncodingUTF8);
+        });
+        RegisterCustomProperty(DirectProperty,[this]() -> CFStringRef {
+            std::lock_guard lock(mutex_);auto text=session_->direct?std::to_string(session_->anchor):"0";
+            return CFStringCreateWithCString(nullptr,text.c_str(),kCFStringEncodingUTF8);
+        });
+        RegisterCustomProperty(LatencyProperty,[this]() -> CFStringRef {
+            std::lock_guard lock(mutex_);
+            auto text=std::to_string(session_->inputLatency.load())+" "+std::to_string(session_->outputLatency.load());
+            return CFStringCreateWithCString(nullptr,text.c_str(),kCFStringEncodingUTF8);
         });
         RegisterCustomProperty(NamesProperty, [this]() -> CFStringRef {
             std::lock_guard lock(mutex_);
@@ -304,8 +394,11 @@ public:
     }
     OSStatus configure(Config c, bool persist) {
         std::lock_guard lock(mutex_);
-        if (session_ && session_->config.encode() == c.encode() && session_->ready.load()) return noErr;
-        auto next = std::make_shared<Session>(c);
+        // Direct transport gets fresh storage and clock epoch on every start,
+        // even when the user format is unchanged. Old samples cannot survive a
+        // service restart whose hardware sample counter starts over.
+        if (!direct_ && session_ && session_->config.encode() == c.encode() && session_->ready.load()) return noErr;
+        auto next = std::make_shared<Session>(c,direct_);
         if (configuring_.exchange(true)) return kAudioHardwareIllegalOperationError;
         if (device_) {
             session_->ready.store(false); next->ready.store(false);
@@ -342,7 +435,7 @@ public:
     }
     OSStatus IsPropertySettable(AudioObjectID id, pid_t pid,
         const AudioObjectPropertyAddress* addr, Boolean* writable) const override {
-        if (addr && (addr->mSelector == ConfigProperty || addr->mSelector == NamesProperty || addr->mSelector == RatesProperty || addr->mSelector == RateRequestProperty)) {
+        if (addr && (addr->mSelector == ConfigProperty || addr->mSelector == NamesProperty || addr->mSelector == RatesProperty || addr->mSelector == RateRequestProperty || addr->mSelector == LatencyProperty)) {
             if (!writable) return kAudioHardwareIllegalOperationError;
             *writable = true; return noErr;
         }
@@ -350,7 +443,7 @@ public:
     }
     OSStatus SetPropertyData(AudioObjectID id, pid_t pid, const AudioObjectPropertyAddress* addr,
         UInt32 qualifierSize, const void* qualifier, UInt32 dataSize, const void* data) override {
-        if (!addr || (addr->mSelector != ConfigProperty && addr->mSelector != NamesProperty && addr->mSelector != RatesProperty && addr->mSelector != RateRequestProperty))
+        if (!addr || (addr->mSelector != ConfigProperty && addr->mSelector != NamesProperty && addr->mSelector != RatesProperty && addr->mSelector != RateRequestProperty && addr->mSelector != LatencyProperty))
             return aspl::Plugin::SetPropertyData(id, pid, addr, qualifierSize, qualifier, dataSize, data);
         if (!data || dataSize != sizeof(CFStringRef)) return kAudioHardwareBadPropertySizeError;
         CFStringRef str = *static_cast<const CFStringRef*>(data);
@@ -361,6 +454,17 @@ public:
         try {
             std::vector<char> text(capacity);
             if (!CFStringGetCString(str,text.data(),capacity,kCFStringEncodingUTF8)) return kAudioHardwareIllegalOperationError;
+            if(addr->mSelector==LatencyProperty) {
+                std::lock_guard lock(mutex_);
+                uint64_t generation; uint32_t in,out,si=0,so=0;std::string tail;
+                std::istringstream values(text.data());
+                if(!(values>>generation>>in>>out))return kAudioHardwareIllegalOperationError;
+                if(values>>si){if(!(values>>so))return kAudioHardwareIllegalOperationError;}else if(!values.eof())return kAudioHardwareIllegalOperationError;
+                if((values>>tail) || generation!=session_->anchor || in>131072 || out>131072 || si>131072 || so>131072)
+                    return kAudioHardwareIllegalOperationError;
+                device_->publishTiming(session_,in,out,si,so);
+                NotifyPropertyChanged(LatencyProperty);return noErr;
+            }
             if (addr->mSelector == RateRequestProperty) { double expected=CFStringGetDoubleValue(str); requestedRate_.compare_exchange_strong(expected,0); return noErr; }
             if (addr->mSelector == RatesProperty) {
                 std::istringstream values(text.data()); double lo,hi; std::vector<AudioValueRange> ranges;
@@ -379,12 +483,15 @@ public:
 class Initialization final : public aspl::DriverRequestHandler {
     std::shared_ptr<aspl::Context> context_;
     std::shared_ptr<PatchPlugin> plugin_;
+    bool direct_;
 public:
-    Initialization(std::shared_ptr<aspl::Context> c, std::shared_ptr<PatchPlugin> p)
-        : context_(c), plugin_(p) {}
+    Initialization(std::shared_ptr<aspl::Context> c, std::shared_ptr<PatchPlugin> p,bool direct=false)
+        : context_(c), plugin_(p),direct_(direct) {}
     OSStatus OnInitialize() override {
+        if(direct_)plugin_->enableDirect();
         const auto [text, found] = aspl::Storage(context_).ReadString("configuration-v1");
-        if (found) { try { plugin_->restoreConfiguration(Config::parse(text)); } catch (...) {} }
+        if (found) { try { plugin_->restoreConfiguration(Config::parse(text)); } catch (...) {if(direct_)return kAudioHardwareUnspecifiedError;} }
+        else if(direct_) {try{plugin_->restoreConfiguration(Config{});}catch(...){return kAudioHardwareUnspecifiedError;}}
         const auto [names, hasNames] = aspl::Storage(context_).ReadString("channel-names-v1");
         if (hasNames) { try { plugin_->setNames(ChannelNames::parse(names),false); } catch (...) {} }
         return noErr;
@@ -395,7 +502,7 @@ std::shared_ptr<aspl::Driver> makeDriver() {
         std::make_shared<aspl::Tracer>(aspl::Tracer::Mode::Noop));
     auto plugin = std::make_shared<PatchPlugin>(context);
     auto driver = std::make_shared<aspl::Driver>(context, plugin);
-    driver->SetDriverHandler(std::make_shared<Initialization>(context, plugin));
+    driver->SetDriverHandler(std::make_shared<Initialization>(context, plugin,true));
     return driver;
 }
 }

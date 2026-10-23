@@ -176,3 +176,21 @@ Final permission verification, 08:47–08:49: user granted the certificate-based
 ## Latency handoff — 2026-10-23
 
 Read-only review and Core Audio property probe completed. Physical RTL, recording offset and long-duration dropout measurements remain unperformed. No buffer/rate/driver changes were made for this investigation. The full stage plan, acceptance gates, rollback workflow and blank run record are in `Docs/LATENCY-PLAN.md` and `Docs/LATENCY-RUN-TEMPLATE.md`; observations are in `Docs/LATENCY-REVIEW-2026-10-23.md`. The read-only probe source is retained in `Tools/latency-probe.cpp`. Source checksums identify the reviewed code, not the installed driver binary. No optimization or scheduled continuation is in progress.
+
+
+## 2026-10-23 — Directional latency reporting, version 0.1.1
+
+Implemented and installed Sync Source device/stream latency plus separately measured StudioPatch input/output delay. Two internal hidden-bridge timing channels identify actual sample timing; a 100 ms control timer publishes directional HAL properties with notifications and session-generation validation. Visible stream latency is zero to avoid duplication.
+
+All six CTest suites and the runtime integration suite passed. Independent physical UFX III output 3 → input 3 captures verified 20 windows across 48/96 kHz, 32/64-frame engine buffers and service/format restarts. Largest observed per-direction discrepancy was 1.128 frames. Reported sums were 1324/1580/724 frames for the respective configurations; physical timestamp-referenced delays were consistently 5 frames larger, matching direct UFX hardware residuals. No hardware correction or stability optimization was applied. Original session restored exactly in JSON meaning, service active at 96 kHz / 32-frame I/O / 64-frame margin.
+
+See [the measurement record](Docs/LATENCY-MEASUREMENT-2026-10-23.md) for the methodology, raw artifact locations, installed backup and limits. Individual DAW compensation and long-duration stability remain unverified.
+
+
+## 2026-10-23 — Direct transport, version 0.2.0
+
+Installed the hardware-clocked shared-memory transport and authenticated launchd broker, replacing the live hidden-bridge path. Sync Source callbacks remain independent of slower interfaces; Apple handles optional secondary drift correction. Correct directional latency and safety offsets use Core Audio's configuration-change mechanism. Input margin spans at least one physical callback, output margin is independent, and the UI displays the new margins.
+
+At engine buffer 32 and client buffer 256, physical UFX cable RTL is **665 → 729 frames at 96 kHz (+0.667 ms)** and **601 → 649 frames at 48 kHz (+1.000 ms)**. Directional reports agree within approximately 1.4 samples in final observations; the hardware's five-frame residual stays separate. Thirty-second waveform checks, a matched four-worker CPU load comparison, 64/512 client buffers, service restart and 96↔48 transitions passed. Optional ZED correction did not slow UFX; 449,280 passive ZED input samples were bit-identical through StudioPatch. Seven CTest suites and the runtime integration tests passed. Earlier gap-producing candidates were rejected.
+
+[Full evidence and limitations](Docs/LATENCY-DIRECT-2026-10-23.md). This is not an all-interface or long-soak stability certification. Final configuration restored to 96 kHz / 32 engine frames with original routing and synchronization choices; later user preset changes preserved.
