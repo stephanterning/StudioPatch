@@ -1,0 +1,13 @@
+.DS_Store
+/Dist/
+/build/
+/work/
+/.build/
+/DerivedData/
+/Scripts/signing-identity.txt
+*.p12
+*.pfx
+*.pem
+*.key
+.env
+.env.*

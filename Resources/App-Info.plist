@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>CFBundleExecutable</key><string>StudioPatch</string>
+<key>CFBundleIdentifier</key><string>se.studiopatch.app</string>
+<key>CFBundleName</key><string>StudioPatch</string>
+<key>CFBundleIconFile</key><string>StudioPatch.icns</string>
+<key>CFBundlePackageType</key><string>APPL</string>
+<key>CFBundleVersion</key><string>0.1.0</string>
+<key>CFBundleShortVersionString</key><string>0.1.0</string>
+<key>LSMinimumSystemVersion</key><string>14.0</string>
+<key>NSMicrophoneUsageDescription</key><string>StudioPatch needs access to your selected audio interfaces to route their inputs to your audio applications.</string>
+<key>NSHighResolutionCapable</key><true/>
+</dict></plist>

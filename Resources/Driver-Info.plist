@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>CFBundleExecutable</key><string>StudioPatch</string>
+<key>CFBundleIdentifier</key><string>se.studiopatch.driver</string>
+<key>CFBundleName</key><string>StudioPatch</string>
+<key>CFBundlePackageType</key><string>BNDL</string>
+<key>CFBundleVersion</key><string>0.1.0</string>
+<key>CFBundleShortVersionString</key><string>0.1.0</string>
+<key>CFPlugInFactories</key><dict><key>C1714A2E-4313-46EC-94A1-4BE9136D8C91</key><string>StudioPatchEntryPoint</string></dict>
+<key>CFPlugInTypes</key><dict><key>443ABAB8-E7B3-491A-B985-BEB9187030DB</key><array><string>C1714A2E-4313-46EC-94A1-4BE9136D8C91</string></array></dict>
+<key>AudioServerPlugIn_MachServices</key><array/>
+<key>sandboxSafe</key><true/>
+</dict></plist>
