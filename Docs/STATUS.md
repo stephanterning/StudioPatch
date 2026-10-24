@@ -6,11 +6,11 @@ StudioPatch has been developed and tested on its author's studio setup, and its 
 
 ## Preset identity and labels — 2026-10-24
 
-The working tree implements per-preset virtual UIDs and Core Audio-owned channel labels, including a copy choice on Save current as new. The updated driver/app must be installed together. The signed package was installed on 2026-10-24; a user-initiated Mac restart is pending to load the new driver and broker. The runtime is stopped until next login.
+The working tree implements per-preset virtual UIDs and Core Audio-owned channel labels, including a copy choice on Save current as new. The updated driver/app must be installed together. The signed package was installed and the Mac restarted on 2026-10-24. The updated driver and runtime are running.
 
 Setting, clearing, copying and channel-name notifications passed live Core Audio probes on disposable private aggregates in both directions. Driver/model tests cover identity changes, retiring the old endpoint, no dirty marker for labels, migration and partial-copy failures. Service integration tests cover UID changes at unchanged audio format and display-name changes without an engine restart.
 
-Native StudioPatch label retention across preset disappearance/reappearance, shrink/grow and reboot remains unverified with the updated installed driver. Audio MIDI Setup/DAW refresh of the new device identity also needs that acceptance run. Explicit destroy/recreate of a **private aggregate** did not retain labels; that experiment does not prove how HAL treats a native driver endpoint. See [verification details](LABEL-VERIFICATION.md).
+Native StudioPatch label retention across repeated preset disappearance/reappearance passed on 2026-10-24: two 46-input/40-output presets (legacy UID and a new per-preset UID) retained every input and output label when switched back and forth twice. Independent Core Audio inventory reads were compared, and the original active preset was restored. A known manual label on the legacy UID also survived the Mac restart. Audio MIDI Setup displayed the copied labels under the new device identity. Shrink/grow, reboot retention for newly created preset UIDs, and DAW identity refresh remain unverified. Label edits now save on focus loss, Return, Done or Escape; focus-loss and Done saves were verified against live Core Audio, and all eight test suites passed. Explicit destroy/recreate of a **private aggregate** did not retain labels; that experiment does not prove how HAL treats a native driver endpoint. See [verification details](LABEL-VERIFICATION.md).
 
 ## Tested setup
 

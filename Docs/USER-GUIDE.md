@@ -55,7 +55,7 @@ Channel counts and routing are stored separately. If you reduce a channel count,
 **Labels…** edits the virtual preset device’s **To Computer** and **From Computer** channel names. Double-click a virtual channel header to select its label, including an unconnected channel.
 
 - Core Audio owns the labels. Changes made in Audio MIDI Setup appear in the matrix automatically; changes applied in StudioPatch update Core Audio.
-- Edit a field and choose **Apply** (or press Return). Applying an empty field removes the manual override and restores the routing-derived name.
+- Edits save when you leave a field, press Return, or close the label editor with **Done** or Escape. Clearing a field removes the manual override and restores the routing-derived name. If saving fails, the editor stays open with your text and an error; press Return or Done to retry.
 - Physical interface names are read-only in StudioPatch. The names currently returned by Core Audio are displayed, without a separate original-name history.
 - Automatic names combine the connected interface and channel names. Unconnected channels use `To Computer N` or `From Computer N`; multiple destinations have combined names.
 - Labels stay on their virtual channel when routing changes. They are not saved with presets and do not add a `*` to the preset name.

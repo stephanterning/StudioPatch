@@ -874,14 +874,39 @@ struct DeviceOrderEditor: View {
 }
 struct LabelEditor: View {
     @ObservedObject var m: Model
+    @State private var drafts: [String:ChannelLabel] = [:]
+    @State private var saving=false
+    @State private var failed=false
+    @State private var closing=false
+    @FocusState private var focused: String?
+    private func key(_ entry:LabelEntry) -> String { "\(entry.direction.rawValue):\(entry.port.channel)" }
+    private func commit() {
+        guard !saving, !failed, !m.ioBusy else { return }
+        guard let id=drafts.keys.sorted().first, let label=drafts[id] else {
+            if closing { m.showingLabels=false }
+            return
+        }
+        saving=true
+        m.editLabel(label) { success in
+            saving=false
+            if success {
+                if drafts[id]?.text == label.text { drafts.removeValue(forKey:id) }
+            } else { failed=true; closing=false }
+            // Model ends its I/O operation after this completion callback.
+        }
+    }
+    private func finish() {
+        closing=true; failed=false; focused=nil
+        commit()
+    }
     var body: some View {
         VStack(alignment:.leading,spacing:16) {
             HStack {
                 Text("StudioPatch channel labels").font(.title2.weight(.semibold))
                 Spacer()
-                Button("Done") { m.showingLabels=false }.keyboardShortcut(.defaultAction)
+                Button("Done",action:finish).keyboardShortcut(.defaultAction)
             }
-            Text("Labels are stored by Core Audio for this preset's device. Apply an empty label to use its routing name. Physical interface names are read-only here.")
+            Text("Labels are saved to Core Audio when you leave a field or press Return. Clear a field to use its routing name. Physical interface names are read-only here.")
                 .font(.callout).foregroundStyle(.secondary)
             Picker("Channels",selection:$m.labelDirection) {
                 Text("To Computer").tag(0)
@@ -891,49 +916,46 @@ struct LabelEditor: View {
                 ScrollView {
                     LazyVStack(alignment:.leading,spacing:8) {
                         ForEach(m.labelEntries) { entry in
-                            ChannelLabelRow(m:m,entry:entry).id(entry.port)
+                            HStack {
+                                VStack(alignment:.leading,spacing:2) {
+                                    Text(entry.device)
+                                    Text(entry.name).font(.caption).foregroundStyle(.secondary).lineLimit(2)
+                                }.frame(width:220,alignment:.leading)
+                                TextField("Empty uses routing name",text:Binding(
+                                    get:{ drafts[key(entry)]?.text ?? entry.name },
+                                    set:{ drafts[key(entry)]=ChannelLabel(port:entry.port,direction:entry.direction,text:$0); failed=false }
+                                ))
+                                .textFieldStyle(.roundedBorder)
+                                .focused($focused,equals:key(entry))
+                                .onSubmit { failed=false; commit() }
+                                .accessibilityLabel("Label for \(entry.device)")
+                            }.padding(8)
+                            .background(m.labelSelection == entry.port ? Color.cyan.opacity(0.16) : Color.clear,in:RoundedRectangle(cornerRadius:6))
+                            .id(entry.port)
                         }
                     }.id(m.labelDirection)
                 }.onAppear { if let selected=m.labelSelection { proxy.scrollTo(selected,anchor:.center) } }
             }
+            if saving { ProgressView("Saving labels…").controlSize(.small) }
             if !m.error.isEmpty { Text(m.error).font(.caption).foregroundStyle(.orange) }
         }.padding(24).frame(width:740,height:580)
-    }
-}
-struct ChannelLabelRow: View {
-    @ObservedObject var m: Model
-    let entry: LabelEntry
-    @State private var draft=""
-    @State private var edited=false
-    private func apply() {
-        m.editLabel(ChannelLabel(port:entry.port,direction:entry.direction,text:draft)) { success in if success { edited=false } }
-    }
-    var body: some View {
-        HStack {
-            VStack(alignment:.leading,spacing:2) {
-                Text(entry.device)
-                Text(entry.name).font(.caption).foregroundStyle(.secondary).lineLimit(2)
-            }.frame(width:220,alignment:.leading)
-            TextField("Empty uses routing name",text:Binding(get:{draft},set:{draft=$0;edited=true}))
-                .textFieldStyle(.roundedBorder).onSubmit { if edited && !m.ioBusy && m.virtualDevice != nil { apply() } }
-                .accessibilityLabel("Label for \(entry.device)")
-            Button("Apply",action:apply).disabled(!edited || m.ioBusy || m.virtualDevice == nil)
-        }.padding(8)
-        .background(m.labelSelection == entry.port ? Color.cyan.opacity(0.16) : Color.clear,in:RoundedRectangle(cornerRadius:6))
-        .onAppear { draft=entry.name }
-        .onChange(of:entry.name) { _,value in if !edited { draft=value } }
+        .interactiveDismissDisabled()
+        .onExitCommand(perform:finish)
+        .onChange(of:focused) { old,_ in if old != nil { failed=false; commit() } }
+        .onChange(of:m.labelDirection) { _,_ in focused=nil; failed=false; commit() }
+        .onChange(of:m.ioBusy) { _,busy in if !busy { commit() } }
     }
 }
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var focusMonitor: Any?
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Buttons and the native matrix do not normally take keyboard focus on macOS.
-        // End channel-count editing before forwarding an outside click to its target.
+        // End field editing before forwarding an outside click to its target.
         focusMonitor = NSEvent.addLocalMonitorForEvents(matching:[.leftMouseDown,.rightMouseDown]) { event in
             if let window=event.window,
                let editor=window.firstResponder as? NSTextView, editor.isFieldEditor,
                let field=editor.delegate as? NSTextField,
-               ["To Computer","From Computer"].contains(field.placeholderString ?? ""),
+               ["To Computer","From Computer","Empty uses routing name"].contains(field.placeholderString ?? ""),
                !field.bounds.contains(field.convert(event.locationInWindow,from:nil)) {
                 window.makeFirstResponder(nil)
             }
