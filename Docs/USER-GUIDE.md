@@ -52,16 +52,98 @@ Channel counts and routing are stored separately. If you reduce a channel count,
 
 ## Labels
 
-**Labels…** lets you name hardware inputs and outputs, for example `Vocal mic` or `RE-201`.
+**Labels…** edits the virtual preset device’s **To Computer** and **From Computer** channel names. Double-click a virtual channel header to select its label, including an unconnected channel.
 
-- Labels appear on a separate line under the original channel name in the matrix and list, such as `UFX III · Analog 9 — Vocal mic`. Original names are never changed.
-- Double-click a hardware channel header to jump straight to its label. Double-clicking a To Computer or From Computer header opens the label of the hardware channel it is connected to.
-- To Computer and From Computer channels take their names from what they are connected to. These are the names your DAW shows for the StudioPatch device. An unconnected channel is called `To Computer N` or `From Computer N`. If one virtual channel feeds several outputs, their names are joined.
-- Clear a label field to remove the label.
+- Core Audio owns the labels. Changes made in Audio MIDI Setup appear in the matrix automatically; changes applied in StudioPatch update Core Audio.
+- Edit a field and choose **Apply** (or press Return). Applying an empty field removes the manual override and restores the routing-derived name.
+- Physical interface names are read-only in StudioPatch. The names currently returned by Core Audio are displayed, without a separate original-name history.
+- Automatic names combine the connected interface and channel names. Unconnected channels use `To Computer N` or `From Computer N`; multiple destinations have combined names.
+- Labels stay on their virtual channel when routing changes. They are not saved with presets and do not add a `*` to the preset name.
 
-![Audio MIDI Setup listing the StudioPatch device's inputs with names such as RE-201, Matriarch L and ZED-R16 · Input 14](images/audio-midi-setup.png)
+Each preset exposes a distinct device UID, named `StudioPatch (<preset name>)`. Renaming or saving an existing preset keeps its identity. Switching presets changes the audio device: audio may stop and your DAW may require you to select the new device.
 
-Channels with a label show it (for example `RE-201`); channels without one show the interface and hardware channel name (for example `ZED-R16 · Input 14`).
+**Save current as new** asks whether to copy labels, create without labels, or cancel. Only names that differ from their current automatic names are copied. An equal-text manual label becomes automatic in the new preset. Copying is a one-time transfer; later edits are independent. If copying fails, the new preset remains saved and StudioPatch offers retry or discard of the remaining transfer. Keep the panel open until the transfer finishes.
+
+Older app-owned labels are migrated when their preset is activated. Original files are backed up with a `.before-core-audio-labels` suffix; labels not mapped to currently exposed virtual channels remain in those backups. Existing different Core Audio names take precedence. Import/export is not included.
+
+### Copy macOS channel names to Ableton Live
+
+The name sync works while **Live is closed**, without Accessibility permission
+or UI automation. It reads names from macOS Core Audio (the names in Audio MIDI
+Setup) and updates the existing labels in Live's `Preferences.cfg`. Live reads
+those labels on its next launch. By default, only the **active StudioPatch preset** device is
+updated; other devices and all non-label settings are preserved.
+
+- **Manual:** quit Live, then double-click `Scripts/Update Ableton Names.command`.
+- **Automatic:** double-click `Scripts/Watch Ableton Names.command` and leave its
+  Terminal window open. It checks every ten seconds, waits while Live is running,
+  and syncs after Live exits. Ctrl-C stops it. It also picks up changes made in
+  StudioPatch while Live remains closed. No login service is installed.
+
+Python 3 and Xcode Command Line Tools are required. The Core Audio reader is
+compiled on first use. The script does not start or quit Live. Let a manual sync
+finish before starting Live. A watcher checks again immediately before replacing
+preferences, but there is no atomic lock shared with Live's startup: avoid
+launching Live at the exact moment the watcher is writing.
+
+From the repository directory:
+
+```sh
+bash Scripts/sync-ableton-channel-names.sh --dry-run   # Preview only (also the default)
+bash Scripts/sync-ableton-channel-names.sh --apply     # Back up and write while Live is closed
+bash Scripts/sync-ableton-channel-names.sh --watch     # Automatic sync every 10 seconds
+bash Scripts/sync-ableton-channel-names.sh --list      # macOS device UIDs and channel names
+bash Scripts/sync-ableton-channel-names.sh --restore "/path/to/backup.cfg"
+```
+
+Use `--device-uid "UID"` to target another device from `--list`. Device identity is
+matched by UID, not display name. `--preferences "/path/to/Preferences.cfg"`
+selects an explicit file. Otherwise the version is read from the installed
+`/Applications/Ableton Live 12 Suite.app`; `--live-app` can select another app
+location. Only Live 12 versions with the recognized embedded schemas are accepted.
+
+Matching L/R pairs such as `Timeline L` and `Timeline R` produce the stereo label
+`Timeline` and **empty mono labels**. A shared parenthetical qualifier is preserved:
+`A&H Master L (analog)` / `A&H Master R (analog)` becomes `A&H Master (analog)`.
+Numbered pairs with an identical prefix keep their mono names and shorten the
+stereo name: `Analog 7` / `Analog 8` becomes `Analog 7/8`, and
+`UFX III · MADI 9` / `UFX III · MADI 10` becomes `UFX III · MADI 9/10`.
+Other pairs keep their Core Audio mono names and combine the names with ` / `
+for stereo, or use one name when identical. A missing driver name uses the channel
+number. Enabled/disabled channels, routing, buffer sizes, sample rates, dormant
+channel labels and other devices are not modified.
+
+**File-format limitation:** Ableton does not document this binary format. The
+adapter checks the embedded schemas and device/channel layout, edits only the
+UTF-16 label spans, then reparses the result and proves that reversing those
+string edits reproduces the original file byte for byte. An unsupported schema,
+odd channel count, missing device or changed channel count stops the write. If
+channel counts changed, select the device in Live and quit once so Live can save
+its new layout, then sync again.
+
+A complete original preferences backup is saved and verified before each change
+under `~/Library/Application Support/AbletonChannelNames/Backups/`. Writes use an
+atomic file replacement after rechecking that Live is closed and preferences
+have not changed. Repeated runs with identical names do not rewrite or back up.
+`--restore` restores **only the target device's active labels** from a `.cfg`
+backup, preserving subsequent changes to other settings; it makes another backup
+first. Specify `--device-uid` for restoration; it requires the same saved channel counts. Stop the watcher before restoring,
+or it will copy the Core Audio names back on its next pass.
+
+Validation: nine focused tests cover L/R and numbered pair naming, Unicode, sparse list IDs, dormant labels,
+other-device preservation, exact restore, idempotence, format rejection, backups,
+refusal to overwrite a concurrent save or write after Live starts, and discovery of the active preset UID. A copy of
+real Live 12.4.7 preferences parsed 101 devices and updated 129 StudioPatch mono
+and stereo labels; restoring reproduced the original bytes exactly.
+
+On 2026-10-24 the script updated the actual preferences while Live was closed,
+with a verified backup. Live 12.4.7 then started successfully and displayed all
+69 input labels (46 mono + 23 stereo) and 60 output labels (40 mono + 20 stereo)
+in Input Config and Output Config. Disabled outputs 27–30 remained disabled;
+96 kHz, 256 samples and five-sample error compensation remained unchanged.
+The Main Out chooser also displayed the new stereo name. Automatic repeated
+operation across a real exit/start cycle and restore into a real Live session
+have not been exercised; their underlying file operations have automated tests.
 
 ## Unplugged interfaces
 
@@ -73,9 +155,9 @@ If a selected interface disappears (unplugged, powered off), it stays in the lis
 
 ## Presets and autosave
 
-Every change is saved automatically and restored the next time you log in or open the panel. There is no Save step for everyday work.
+Configuration changes are saved automatically and restored the next time you log in or open the panel. Core Audio stores applied label changes independently. There is no Save step for everyday work.
 
-Presets are named snapshots of the whole configuration:
+Presets are named snapshots of routing and audio configuration, excluding Core Audio labels:
 
 - The name of the active preset is shown at the top. An asterisk (`*`) means the current configuration differs from it; **Save** updates the preset.
 - **Presets…** lets you save the current configuration as a new preset, load, rename, overwrite or delete presets. Loading applies the preset immediately.

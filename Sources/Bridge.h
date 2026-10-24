@@ -5,6 +5,8 @@ extern "C" {
 char* SPInventory(void);
 char* SPFollowMaster(const char* config);
 char* SPSetChannelNames(const char* names);
+char* SPReadChannelLabels(const char* uid);
+char* SPSetChannelLabel(const char* request);
 char* SPConfigure(const char* config);
 char* SPStart(const char* config);
 char* SPUpdateRouting(const char* config);

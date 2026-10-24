@@ -76,6 +76,20 @@ try:
  wait(lambda s:s['running'])
  assert (root/'events').read_text().count('start')==starts+1
  print('PASS: invalidated clock after a simulated interruption rebuilds one engine',flush=True)
+ # Display-name changes are metadata only; identity changes recreate the device even at identical widths/rate.
+ starts=(root/'events').read_text().count('start')
+ routes=(root/'events').read_text().count('route')
+ preset['virtualDeviceName']='StudioPatch (Renamed studio)';save()
+ wait(lambda s:json.loads((root/'names.json').read_text()).get('deviceName')==preset['virtualDeviceName'])
+ assert (root/'events').read_text().count('start')==starts
+ assert (root/'events').read_text().count('route')==routes
+ print('PASS: preset rename publishes metadata without audio restart or routing update',flush=True)
+ for uid in ['se.studiopatch.preset.test-a','se.studiopatch.preset.test-b','se.studiopatch.preset.test-a']:
+  preset['virtualDeviceUID']=uid;save();starts+=1
+  wait(lambda s:s['running'] and json.loads((root/'names.json').read_text()).get('uid')==uid)
+  assert (root/'events').read_text().count('start')==starts
+ assert (root/'events').read_text().count('route')==routes
+ print('PASS: distinct preset UIDs and return to an existing UID each rebuild the device',flush=True)
  # A persistent HAL failure gets one fresh process; the budget survives exec.
  images=(root/'events').read_text().count('image')
  (root/'bad-object').write_text('1')
@@ -84,7 +98,7 @@ try:
  while not (root/'recovery-attempt.json').exists() and time.time()<end:time.sleep(.1)
  assert (root/'recovery-attempt.json').exists()
  (root/'bad-object').unlink()
- wait(lambda s:s['running'],12)
+ wait(lambda s:s['running'] and (root/'events').read_text().count('image')==images+1,12)
  assert (root/'events').read_text().count('image')==images+1
  print('PASS: persistent HAL error replaces only the service and recovers',flush=True)
  (root/'bad-object').write_text('1')
@@ -104,7 +118,7 @@ try:
  while not (root/'recovery-attempt.json').exists() and time.time()<end:time.sleep(.1)
  assert (root/'recovery-attempt.json').exists()
  (root/'hang-control').unlink(missing_ok=True)
- wait(lambda s:s['running'],12)
+ wait(lambda s:s['running'] and (root/'events').read_text().count('image')==images+1,12)
  assert (root/'events').read_text().count('image')==images+1
  print('PASS: blocked control worker gets bounded process recovery',flush=True)
  # Corrupt budget and failed exec exercise the real service's fail-closed exits.

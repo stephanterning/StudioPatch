@@ -18,12 +18,14 @@ char* SPRuntimeRates(const char*){
  if(std::ifstream(root()+"/hang-control").good()){std::remove((root()+"/hang-control").c_str());std::this_thread::sleep_for(std::chrono::seconds(120));}
 std::ifstream f(root()+"/request");double rate=0;f>>rate;return reply("{\"requested\":"+std::to_string(rate)+",\"masterRate\":"+std::to_string(hardwareRate)+"}");}
 char* SPSetHardwareRate(const char* raw){event("rate");std::ifstream f(root()+"/fail");if(f.good())return reply("{\"error\":\"Simulated failure\"}");std::string json(raw);auto pos=json.find("\"sampleRate\":");if(pos!=std::string::npos)hardwareRate=std::stod(json.substr(pos+13));return reply("{\"ok\":true}");}
-char* SPConfigure(const char* raw){event("configure");std::string json(raw);auto value=[&](std::string key){return std::stoi(json.substr(json.find("\""+key+"\":")+key.size()+3));};config="1 "+std::to_string(value("inputCount"))+" "+std::to_string(value("outputCount"))+" "+std::to_string(value("sampleRate"))+" 256";return reply("{\"ok\":true}");}
+char* SPConfigure(const char* raw){event("configure");std::string json(raw);auto value=[&](std::string key){return std::stoi(json.substr(json.find("\""+key+"\":")+key.size()+3));};config="1 "+std::to_string(value("inputCount"))+" "+std::to_string(value("outputCount"))+" "+std::to_string(value("sampleRate"))+" 256";auto pos=json.find("\"virtualDeviceUID\":\"");if(pos!=std::string::npos){auto start=pos+20;auto uid=json.substr(start,json.find('"',start)-start);if(uid!="se.studiopatch.device.v1"){config[0]='2';config+=" "+uid;}}return reply("{\"ok\":true}");}
 char* SPStart(const char*){std::remove((root()+"/invalid-clock").c_str());event("start");running=true;return reply("{\"ok\":true}");}
 char* SPUpdateRouting(const char*){event("route");return reply(running?"{\"applied\":true}":"{\"applied\":false}");}
 void SPStop(){if(running)event("stop");running=false;}
 char* SPStatus(){if(std::ifstream(root()+"/invalid-clock").good())return reply(R"({"running":false,"invalidated":true,"cycles":1,"badBuffers":0,"bufferFrames":64})");return reply(std::string("{\"running\":")+(running?"true":"false")+",\"invalidated\":false,\"cycles\":1,\"badBuffers\":0,\"bufferFrames\":64,\"latencyDiagnostics\":\"{}\"}");}
-char* SPSetChannelNames(const char*){return reply("{\"ok\":true}");}
+char* SPSetChannelNames(const char* raw){std::ofstream(root()+"/names.json")<<raw;return reply("{\"ok\":true}");}
+char* SPReadChannelLabels(const char*){return reply("{\"error\":\"Unavailable in fake service\"}");}
+char* SPSetChannelLabel(const char*){event("label");return reply("{\"ok\":true}");}
 char* SPFollowMaster(const char*){return reply("{\"sampleRate\":96000}");}
 char* SPAcknowledgeRate(const char*){std::ofstream(root()+"/request")<<0;return reply("{\"ok\":true}");}
 void SPFree(char* p){free(p);}

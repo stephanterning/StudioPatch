@@ -25,8 +25,9 @@ final class DeviceInventoryObserver {
         watch(AudioObjectID(kAudioObjectSystemObject), kAudioHardwarePropertyDevices)
     }
     private func watch(_ object: AudioObjectID, _ selector: AudioObjectPropertySelector,
-                       scope: AudioObjectPropertyScope = kAudioObjectPropertyScopeGlobal) {
-        var address = AudioObjectPropertyAddress(mSelector:selector,mScope:scope,mElement:kAudioObjectPropertyElementMain)
+                       scope: AudioObjectPropertyScope = kAudioObjectPropertyScopeGlobal,
+                       element: AudioObjectPropertyElement = kAudioObjectPropertyElementMain) {
+        var address = AudioObjectPropertyAddress(mSelector:selector,mScope:scope,mElement:element)
         let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
             guard let self else { return }
             self.pending?.cancel()
@@ -50,7 +51,7 @@ final class DeviceInventoryObserver {
             watch(id,kAudioDevicePropertyNominalSampleRate)
             for scope in [kAudioObjectPropertyScopeInput,kAudioObjectPropertyScopeOutput] {
                 watch(id,kAudioDevicePropertyStreamConfiguration,scope:scope)
-                watch(id,kAudioObjectPropertyElementName,scope:scope)
+                watch(id,kAudioObjectPropertyElementName,scope:scope,element:kAudioObjectPropertyElementWildcard)
             }
         }
         deviceIDs = ids
@@ -137,7 +138,7 @@ enum AudioWorker {
     }
 }
 
-func runtimeChannelNames(preset:Preset,devices:[Device]) throws -> String {
+func runtimeChannelNames(preset:Preset,devices:[Device],includeLegacyLabels:Bool=false) throws -> String {
     func name(_ channel:Int,input:Bool)->String {
         let connected:Set<Port> = input ? Set(preset.activeInputs.indices.contains(channel-1) ? [preset.activeInputs[channel-1]].compactMap{$0} : []) : Set(preset.activeOutputs.filter{$0.virtualChannel==channel}.map{Port(deviceUID:$0.deviceUID,channel:$0.channel)})
         var labels:[String]=[]
@@ -145,7 +146,7 @@ func runtimeChannelNames(preset:Preset,devices:[Device]) throws -> String {
             for (index,original) in device.channelNames(input:input).enumerated() {
                 let port=Port(deviceUID:device.uid,channel:index+1)
                 guard connected.contains(port) else {continue}
-                let custom=preset.label(for:port,direction:input ? .input : .output)
+                let custom=includeLegacyLabels ? preset.label(for:port,direction:input ? .input : .output) : ""
                 let text=custom.isEmpty ? "\(device.shortName) · \(original)" : custom
                 if !labels.contains(text){labels.append(text)}
             }
@@ -178,4 +179,33 @@ final class DirectoryObserver {
         s.setCancelHandler {close(fd)};source=s;s.resume()
     }
     deinit {source?.cancel()}
+}
+
+// Ephemeral snapshot of HAL's effective names and the driver's current defaults.
+// Equality is deliberately the copy rule; HAL does not expose alias provenance.
+struct CoreAudioLabels: Codable {
+    var uid: String
+    var inputs: [String]
+    var outputs: [String]
+    var defaultInputs: [String]
+    var defaultOutputs: [String]
+    var overrides: [ChannelLabel] {
+        var result: [ChannelLabel] = []
+        for input in [true,false] {
+            let names=input ? inputs : outputs, defaults=input ? defaultInputs : defaultOutputs
+            for (index,name) in names.enumerated() where defaults.indices.contains(index) && name != defaults[index] {
+                result.append(ChannelLabel(port:Port(deviceUID:uid,channel:index+1),direction:input ? .input : .output,text:name))
+            }
+        }
+        return result
+    }
+    static func read(_ uid:String) async throws -> CoreAudioLabels {
+        let data=try await AudioWorker.call { uid.withCString { SPReadChannelLabels($0) } }
+        return try JSONDecoder().decode(Self.self,from:data)
+    }
+    static func write(_ label:ChannelLabel) async throws {
+        let data=try JSONSerialization.data(withJSONObject:["uid":label.port.deviceUID,"channel":label.port.channel,"direction":label.direction.rawValue,"text":label.text])
+        let raw=String(decoding:data,as:UTF8.self)
+        _ = try await AudioWorker.call { raw.withCString { SPSetChannelLabel($0) } }
+    }
 }

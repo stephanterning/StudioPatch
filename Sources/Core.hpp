@@ -12,6 +12,7 @@ namespace patch {
 constexpr const char* DeviceUID = "se.studiopatch.device.v1";
 constexpr const char* BridgeUID = "se.studiopatch.bridge.v1";
 constexpr uint32_t ConfigProperty = 0x73706366; // spcf
+constexpr uint32_t DeviceNameProperty = 0x7370646e; // spdn
 constexpr uint32_t TransportStatusProperty = 0x73707473; // spts
 constexpr uint32_t StatsProperty = 0x73707374; // spst
 constexpr uint32_t ReadyProperty = 0x73707264; // sprd
@@ -24,15 +25,19 @@ inline bool supportedSampleRate(double rate) { return std::isfinite(rate) && rat
 
 struct Config {
     uint32_t inputs = 18, outputs = 18, rate = 96000, delay = 256;
+    std::string uid = DeviceUID;
     std::string encode() const {
-        return "1 " + std::to_string(inputs) + " " + std::to_string(outputs) + " " +
+        const auto numeric = std::to_string(inputs) + " " + std::to_string(outputs) + " " +
             std::to_string(rate) + " " + std::to_string(delay);
+        return uid == DeviceUID ? "1 " + numeric : "2 " + numeric + " " + uid;
     }
     static Config parse(const std::string& text) {
         Config c; int version; std::string tail;
         std::istringstream s(text);
         if (!(s >> version >> c.inputs >> c.outputs >> c.rate >> c.delay) ||
-            (s >> tail) || version != 1 || c.inputs > MaxChannels ||
+            (version == 2 && !(s >> c.uid)) || (s >> tail) || (version != 1 && version != 2) ||
+            (c.uid != DeviceUID && (c.uid.rfind("se.studiopatch.preset.",0) != 0 || c.uid.size() > 100 ||
+                c.uid.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.-") != std::string::npos)) || c.inputs > MaxChannels ||
             c.outputs > MaxChannels || (c.inputs + c.outputs == 0) ||
             !supportedSampleRate(c.rate) ||
             c.delay < 32 || c.delay > 4096)

@@ -292,7 +292,7 @@ public:
             watch(d->id,kAudioDevicePropertyStreamConfiguration,kAudioObjectPropertyScopeInput);watch(d->id,kAudioDevicePropertyStreamConfiguration,kAudioObjectPropertyScopeOutput);
         }
         invalidated=false;publishLatency();
-        auto virtualID=translate(@(patch::DeviceUID));
+        auto virtualID=translate(@(c.uid.c_str()));
         bool ready=false;
         for(int attempt=0;attempt<100;++attempt) {
             ready=get<UInt32>(virtualID,kAudioDevicePropertySafetyOffset,kAudioObjectPropertyScopeInput)==masterInputSafety &&

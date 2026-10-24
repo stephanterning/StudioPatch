@@ -31,8 +31,7 @@ import AppKit
         reopened.devices = [Device(id:123,uid:"ufx",name:"Fireface UFX III",inputs:9,outputs:9,sampleRate:96000,aggregate:false,
             inputNames:(1...9).map { "Analog \($0)" },outputNames:(1...9).map { "Analog \($0)" })]
         reopened.openLabels(port:labelledPort,direction:1)
-        precondition(reopened.showingLabels && reopened.labelSelection == labelledPort)
-        precondition(reopened.labelEntries[8].port == labelledPort && reopened.labelEntries[8].direction == .output)
+        precondition(!reopened.showingLabels) // Physical names are read-only.
         // Named slots are durable snapshots, independent of the working session.
         let slotsURL=directory.appendingPathComponent("library-test/session.json")
         let slotsModel=Model(store:SessionStore(url:slotsURL),discoverDevices:false)
@@ -49,13 +48,15 @@ import AppKit
         precondition(reopenedSlots.preset.inputCount==1 && reopenedSlots.activePresetTitle=="Studio *")
         reopenedSlots.openPresets()
         precondition(reopenedSlots.presetSlots.count==1 && reopenedSlots.presetSlots[0].name=="Studio")
-        let expectedSlotEngine=try app.preset.encoded(forEngine:true)
+        var expectedSlot=app.preset;expectedSlot.virtualDeviceUID=slotsModel.preset.deviceUID
+        let expectedSlotEngine=try expectedSlot.encoded(forEngine:true)
         precondition(tryEngineEquals(reopenedSlots.presetSlots[0].configuration,expectedSlotEngine))
         try reopenedSlots.loadSlot(slotID)
         precondition((try? reopenedSlots.preset.encoded()) == savedSlot)
+        let stableUID=reopenedSlots.preset.deviceUID
         precondition(!reopenedSlots.presetIsModified)
         try reopenedSlots.renameSlot(slotID,name:"Live")
-        precondition(reopenedSlots.activePresetTitle=="Live")
+        precondition(reopenedSlots.activePresetTitle=="Live" && reopenedSlots.preset.deviceUID==stableUID && !reopenedSlots.presetIsModified)
         reopenedSlots.preset.inputCount=5; reopenedSlots.preset.resizeChannels()
         let sameID=try reopenedSlots.saveSlot(name:"Live",replacing:slotID)
         precondition(sameID==slotID && reopenedSlots.presetSlots.count==1)
@@ -68,7 +69,7 @@ import AppKit
         do { try reopenedSlots.deleteSlot(slotID) } catch { blockedActiveDelete=true }
         precondition(blockedActiveDelete)
         let otherID=try reopenedSlots.saveSlot(name:"Backup")
-        precondition(otherID != slotID && reopenedSlots.presetSlots.count==2)
+        precondition(otherID != slotID && reopenedSlots.presetSlots.count==2 && reopenedSlots.preset.deviceUID != stableUID)
         let currentBeforeDelete=try reopenedSlots.preset.encoded()
         try reopenedSlots.deleteSlot(slotID)
         precondition((try? reopenedSlots.preset.encoded()) == currentBeforeDelete)
@@ -99,53 +100,90 @@ import AppKit
         computer.devices = reopened.devices
         computer.preset.devices = reopened.preset.devices
         computer.preset.inputs[0] = labelledPort
-        computer.preset.setLabel("Vocal",for:labelledPort,direction:.input)
         computer.preset.outputs = [Playback(deviceUID:"ufx",channel:8,virtualChannel:1),Playback(deviceUID:"ufx",channel:9,virtualChannel:1)]
-        computer.preset.setLabel("Monitor L",for:Port(deviceUID:"ufx",channel:8),direction:.output)
-        computer.preset.setLabel("Monitor R",for:labelledPort,direction:.output)
-        precondition(computer.computerName(1,input:true,multiline:true) == "To Computer 1\nVocal")
-        precondition(computer.computerName(1,input:false,multiline:true) == "From Computer 1\nMonitor L · Monitor R")
-        precondition(computer.computerName(2,input:true) == "To Computer 2")
-        precondition(computer.exposedChannelName(1,input:true) == "Vocal")
-        precondition(computer.exposedChannelName(1,input:false) == "Monitor L · Monitor R")
-        precondition(computer.exposedChannelName(2,input:true) == "To Computer 2")
+        precondition(computer.computerName(1,input:true,multiline:true) == "To Computer 1\nUFX III · Analog 9")
+        precondition(computer.exposedChannelName(1,input:false) == "UFX III · Analog 8 · UFX III · Analog 9")
         let names=try JSONSerialization.jsonObject(with:Data(computer.channelNamesPayload().utf8)) as! [String:[String]]
         precondition(names["inputs"]?.count == 18 && names["outputs"]?.count == 18)
-        precondition(names["inputs"]?[0] == "Vocal" && names["outputs"]?[0] == "Monitor L · Monitor R")
-
-        // Legacy computer labels are ignored, and new ones cannot be set.
-        let virtualPort=Port(deviceUID:Preset.virtualUID,channel:1)
-        computer.preset.channelLabels?.append(ChannelLabel(port:virtualPort,direction:.input,text:"Old computer label"))
-        computer.preset.setLabel("New computer label",for:virtualPort,direction:.input)
-        precondition(computer.preset.label(for:virtualPort,direction:.input).isEmpty)
-        precondition(computer.computerName(1,input:true) == "To Computer 1 — Vocal")
+        precondition(names["inputs"]?[0] == "UFX III · Analog 9")
+        computer.rememberDevices()
+        _ = try computer.saveSlot(name:"Virtual labels")
+        let clean=computer.preset.comparisonData(), sessionBefore=try Data(contentsOf:directory.appendingPathComponent("computer.json"))
+        let uid=computer.preset.deviceUID
+        let virtual=Device(id:44,uid:uid,name:"StudioPatch",inputs:18,outputs:18,sampleRate:96000,aggregate:false,
+                           inputNames:["Changed in Audio MIDI Setup"],outputNames:["Monitors"])
+        computer.updateInventory(computer.devices + [virtual])
+        precondition(computer.exposedChannelName(1,input:true)=="Changed in Audio MIDI Setup")
+        precondition(computer.exposedChannelName(1,input:false)=="Monitors")
+        precondition(computer.preset.comparisonData()==clean && !computer.presetIsModified)
+        let sessionAfter=try Data(contentsOf:directory.appendingPathComponent("computer.json"))
+        precondition(sessionAfter == sessionBefore)
         computer.openComputerLabels(1,input:true)
-        precondition(computer.labelSelection == labelledPort && computer.labelDirection == 0)
-        precondition(computer.labelEntries.allSatisfy { $0.port.deviceUID != Preset.virtualUID })
-        computer.openComputerLabels(1,input:false)
-        precondition(computer.labelSelection == Port(deviceUID:"ufx",channel:8) && computer.labelDirection == 1)
-        computer.showingLabels=false
-        computer.openComputerLabels(2,input:true)
-        precondition(!computer.showingLabels)
-        computer.preset.inputCount=0; computer.preset.outputCount=0
-        precondition(computer.computerPorts(1,input:true).isEmpty && computer.computerPorts(1,input:false).isEmpty)
-        computer.preset.inputCount=18; computer.preset.outputCount=18
-        precondition(computer.computerName(1,input:true) == "To Computer 1 — Vocal")
-        computer.preset.setLabel("New vocal",for:labelledPort,direction:.input)
-        precondition(computer.computerName(1,input:true) == "To Computer 1 — New vocal")
-        computer.preset.setLabel("",for:labelledPort,direction:.input)
-        precondition(computer.computerName(1,input:true) == "To Computer 1 — UFX III · Analog 9")
-        computer.preset.inputs[0]=nil; computer.preset.outputs=[]
-        precondition(computer.computerName(1,input:true) == "To Computer 1")
-        precondition(computer.computerName(1,input:false) == "From Computer 1")
-        precondition(reopened.preset.label(for:Port(deviceUID:"zed",channel:9),direction:.input) == "Synth")
-        let exported = try JSONDecoder().decode(Preset.self,from:Data(reopened.preset.encoded().utf8))
-        precondition(exported.label(for:labelledPort,direction:.input) == "Vocal microphone")
-        precondition(reopened.inputPorts[8].1 == "UFX III · Analog 9 — Vocal microphone")
-        precondition(reopened.outputPorts[8].1 == "UFX III · Analog 9 — Monitor left")
-        reopened.preset.setLabel("",for:labelledPort,direction:.input)
-        precondition(reopened.inputPorts[8].1 == "UFX III · Analog 9")
-        precondition(reopened.preset.label(for:labelledPort,direction:.output) == "Monitor left")
+        precondition(computer.labelSelection==Port(deviceUID:uid,channel:1) && computer.labelDirection==0)
+        computer.openComputerLabels(2,input:false) // Unrouted channels are editable too.
+        precondition(computer.showingLabels && computer.labelDirection==1)
+        precondition(computer.labelEntries.allSatisfy { $0.port.deviceUID == uid })
+        var writes:[ChannelLabel]=[]
+        computer.labelWriter={ writes.append($0) }
+        computer.labelReader={ requested in
+            CoreAudioLabels(uid:requested,inputs:requested==uid ? ["Custom"] + Array(repeating:"Automatic",count:17) : Array(repeating:"Automatic",count:18),
+                            outputs:Array(repeating:"Automatic",count:18),defaultInputs:Array(repeating:"Automatic",count:18),defaultOutputs:Array(repeating:"Automatic",count:18))
+        }
+        let copied=try await computer.saveAsNew(name:"Copied",copyLabels:true)
+        precondition(computer.preset.activePresetID==copied && computer.preset.deviceUID != uid)
+        precondition(writes.count==1 && writes[0].text=="Custom" && writes[0].port.deviceUID==computer.preset.deviceUID)
+        precondition(computer.preset.channelLabels==nil && !computer.presetIsModified && computer.pendingLabelCopy==nil)
+        let storedNew=try String(contentsOf:directory.appendingPathComponent("computer.json"),encoding:.utf8)
+        precondition(!storedNew.contains("Custom") && !storedNew.contains("channelLabels"))
+        writes=[]
+        _ = try await computer.saveAsNew(name:"Without",copyLabels:false)
+        precondition(writes.isEmpty && !computer.presetIsModified)
+        // A source read failure must not create a preset or switch identities.
+        let beforeFailure=computer.preset.deviceUID, slotCount=computer.presetSlots.count
+        computer.labelReader={ _ in throw NSError(domain:"test",code:1) }
+        do { _ = try await computer.saveAsNew(name:"Read failure",copyLabels:true);preconditionFailure() } catch {}
+        precondition(computer.preset.deviceUID==beforeFailure && computer.presetSlots.count==slotCount)
+        // A destination write failure retains the remaining in-memory copy for retry.
+        computer.labelReader={ requested in CoreAudioLabels(uid:requested,inputs:["Custom"]+Array(repeating:"Automatic",count:17),outputs:Array(repeating:"Automatic",count:18),defaultInputs:Array(repeating:"Automatic",count:18),defaultOutputs:Array(repeating:"Automatic",count:18)) }
+        computer.labelWriter={ _ in throw NSError(domain:"test",code:2) }
+        do { _ = try await computer.saveAsNew(name:"Write failure",copyLabels:true);preconditionFailure() } catch {}
+        precondition(computer.preset.deviceUID != beforeFailure && computer.presetSlots.count==slotCount+1)
+        precondition(computer.pendingLabelCopy?.count==1 && computer.labelNotice.contains("not copied"))
+        precondition(!computer.presetIsModified)
+        computer.labelWriter={ writes.append($0) }
+        computer.retryLabelCopy()
+        for _ in 0..<100 where computer.ioBusy { try await Task.sleep(nanoseconds:10_000_000) }
+        precondition(computer.pendingLabelCopy==nil && !computer.ioBusy)
+        let beforeLabelEdit=computer.preset.comparisonData()
+        let target=Port(deviceUID:computer.preset.deviceUID,channel:1)
+        computer.editLabel(ChannelLabel(port:target,direction:.input,text:""))
+        for _ in 0..<100 where computer.ioBusy { try await Task.sleep(nanoseconds:10_000_000) }
+        precondition(writes.last?.text=="" && writes.last?.port==target)
+        precondition(computer.preset.comparisonData()==beforeLabelEdit && !computer.presetIsModified)
+        precondition(computer.preset.channelLabels==nil)
+        // Existing aliases win migration. Fan-out maps one legacy physical label
+        // to each exposed virtual channel; never write to that physical port.
+        let migrationURL=directory.appendingPathComponent("migration/session.json")
+        let migration=Model(store:SessionStore(url:migrationURL),discoverDevices:false)
+        migration.devices=reopened.devices
+        migration.preset.devices=reopened.preset.devices
+        migration.preset.inputs[0]=labelledPort;migration.preset.inputs[1]=labelledPort
+        migration.preset.setLabel("Old label",for:labelledPort,direction:.input)
+        try migration.restoreActivePreset()
+        precondition(migration.preset.deviceUID==Preset.virtualUID)
+        let base=try JSONSerialization.jsonObject(with:Data(migration.channelNamesPayload().utf8)) as! [String:[String]]
+        var actual=base["inputs"]!;actual[0]="Existing Core Audio label"
+        migration.updateInventory(migration.devices+[Device(id:46,uid:migration.preset.deviceUID,name:"StudioPatch",inputs:18,outputs:18,sampleRate:96000,aggregate:false,inputNames:actual,outputNames:base["outputs"]!)])
+        migration.labelReader={ uid in CoreAudioLabels(uid:uid,inputs:actual,outputs:base["outputs"]!,defaultInputs:base["inputs"]!,defaultOutputs:base["outputs"]!) }
+        var migrated:[ChannelLabel]=[]
+        migration.labelWriter={ migrated.append($0) }
+        migration.migrateLegacyLabelsIfReady()
+        for _ in 0..<100 where migration.ioBusy { try await Task.sleep(nanoseconds:10_000_000) }
+        precondition(migration.preset.channelLabels==nil && migration.activeSlot?.configuration.channelLabels==nil)
+        precondition(migrated.count==1 && migrated[0].port==Port(deviceUID:Preset.virtualUID,channel:2) && migrated[0].text=="Old label")
+        let backup=try String(contentsOf:migrationURL.appendingPathExtension("before-core-audio-labels"),encoding:.utf8)
+        precondition(backup.contains("Old label"))
+        precondition(reopened.inputPorts[8].1=="UFX III · Analog 9") // Legacy labels do not rename hardware.
         reopened.preset.inputCount = 37; reopened.preset.outputCount = 21
         precondition(reopened.preset.activeInputs[36] == Port(deviceUID:"ufx",channel:9))
         precondition(reopened.preset.activeOutputs[0].virtualChannel == 21)
@@ -213,10 +251,10 @@ import AppKit
         offline.updateInventory([])
         precondition(offline.missingDevices.count == 1 && offline.listedHardware[0].name == card.name)
         precondition(offline.inputPorts.count == 4 && offline.outputPorts.count == 3)
-        precondition(offline.inputPorts[1].1 == "Offline test card · Line — Synth")
-        precondition(offline.outputPorts[2].1 == "Offline test card · Send — Echo")
-        precondition(offline.computerLabel(1,input:true) == "Synth")
-        precondition(offline.computerLabel(2,input:false) == "Echo")
+        precondition(offline.inputPorts[1].1 == "Offline test card · Line")
+        precondition(offline.outputPorts[2].1 == "Offline test card · Send")
+        precondition(offline.computerLabel(1,input:true) == "Offline test card · Line")
+        precondition(offline.computerLabel(2,input:false) == "Offline test card · Send")
         let relaunched=Model(store:SessionStore(url:offlineURL),discoverDevices:false)
         precondition(relaunched.inputPorts.count == 4 && relaunched.outputPorts.count == 3)
         precondition(relaunched.selected[0].id == 0 && relaunched.selected[0].name == card.name)
@@ -297,5 +335,16 @@ import AppKit
         for _ in 0..<100 where probe.ioBusy { try await Task.sleep(nanoseconds:10_000_000) }
         precondition(!probe.ioBusy && probe.ioStatus.isEmpty)
         print("PASS: actual Model autosave/reopen, dormant routes, empty edits, growth, corrupt backup and write failure")
+    }
+}
+
+// Test fixtures for the old serialized format; production has no label mutator.
+extension Preset {
+    mutating func setLabel(_ text: String, for port: Port, direction: PortDirection) {
+        guard port.deviceUID != Self.virtualUID else { return }
+        var labels = channelLabels ?? []
+        labels.removeAll { $0.port == port && $0.direction == direction }
+        if !text.isEmpty { labels.append(ChannelLabel(port:port,direction:direction,text:text)) }
+        channelLabels = labels.isEmpty ? nil : labels
     }
 }

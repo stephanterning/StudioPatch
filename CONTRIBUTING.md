@@ -30,7 +30,7 @@ export STUDIOPATCH_SIGNING_IDENTITY="Apple Development: Your Name (TEAMID1234)"
 bash Scripts/build.sh
 ```
 
-The scripts use `build/` for intermediate files; set `STUDIOPATCH_BUILD_DIR` to use another directory. `build/`, `Dist/` and `work/` are ignored by Git.
+The scripts use `build/` for intermediate files; set `STUDIOPATCH_BUILD_DIR` to use another directory. `build/`, `Dist/` and `work/` are ignored by Git. Set `STUDIOPATCH_DIST_DIR` to stage a signed package separately without replacing a running service’s `Dist/` bundle.
 
 You can open `Dist/StudioPatch.app` without installing the driver. Interfaces are listed and routing can be edited; audio stays off.
 

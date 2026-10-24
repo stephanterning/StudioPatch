@@ -46,6 +46,14 @@ import CoreAudio
     private var timer: Timer?
     private var inventoryTicks=0
     private var liveRuntime=false
+    private var statusObserver: DirectoryObserver?
+    var labelReader: (String) async throws -> CoreAudioLabels = CoreAudioLabels.read
+    var labelWriter: (ChannelLabel) async throws -> Void = CoreAudioLabels.write
+    @Published var pendingLabelCopy: [ChannelLabel]? = nil
+    @Published var labelNotice = ""
+    private var copyUID: String?
+    var virtualDevice: Device? { devices.first { $0.uid == preset.deviceUID } }
+
     @Published private var runtimeLatencyDiagnostics: String?
     var interfaceTimingText: String {
         guard let raw=runtimeLatencyDiagnostics,let data=raw.data(using:.utf8),
@@ -137,12 +145,11 @@ import CoreAudio
             d.channelNames(input:input).enumerated().map { index, name in
                 let port = Port(deviceUID:d.uid,channel:index+1)
                 let original = "\(d.shortName) · \(name)"
-                let label = preset.label(for:port,direction:input ? .input : .output)
-                return (port, original + (includeLabels && !label.isEmpty ? (multiline ? "\n" : " — ") + label : ""))
+                return (port, original)
             }
         }
     }
-    // Computer labels are derived from routing; only hardware owns editable labels.
+    // Hardware names are read-only. Virtual labels are read from Core Audio.
     func computerPorts(_ channel: Int, input: Bool) -> [Port] {
         guard channel > 0, channel <= (input ? preset.inputCount : preset.outputCount) else { return [] }
         let connected: Set<Port>
@@ -153,15 +160,17 @@ import CoreAudio
         }
         return ports(input:input,includeLabels:false,displayOrder:false).map(\.0).filter { connected.contains($0) }
     }
-    func computerLabel(_ channel: Int, input: Bool) -> String {
-        let originals = Dictionary(uniqueKeysWithValues:ports(input:input,includeLabels:false))
-        var labels: [String] = []
+    func automaticName(_ channel: Int, input: Bool) -> String {
+        let originals=Dictionary(uniqueKeysWithValues:ports(input:input,includeLabels:false))
+        var names:[String]=[]
         for port in computerPorts(channel,input:input) {
-            let custom = preset.label(for:port,direction:input ? .input : .output)
-            let label = custom.isEmpty ? (originals[port] ?? "") : custom
-            if !label.isEmpty, !labels.contains(label) { labels.append(label) }
+            if let name=originals[port], !names.contains(name) { names.append(name) }
         }
-        return labels.joined(separator:" · ")
+        return names.isEmpty ? "\(input ? "To Computer" : "From Computer") \(channel)" : names.joined(separator:" · ")
+    }
+    func computerLabel(_ channel: Int, input: Bool) -> String {
+        let name=exposedChannelName(channel,input:input)
+        return name == "\(input ? "To Computer" : "From Computer") \(channel)" ? "" : name
     }
     func computerName(_ channel: Int, input: Bool, multiline: Bool = false) -> String {
         let name="\(input ? "To Computer" : "From Computer") \(channel)"
@@ -169,27 +178,95 @@ import CoreAudio
         return name + (label.isEmpty ? "" : (multiline ? "\n" : " — ") + label)
     }
     func exposedChannelName(_ channel: Int, input: Bool) -> String {
-        let label=computerLabel(channel,input:input)
-        return label.isEmpty ? "\(input ? "To Computer" : "From Computer") \(channel)" : label
+        if let device=virtualDevice {
+            let names=device.channelNames(input:input)
+            if names.indices.contains(channel-1) { return names[channel-1] }
+        }
+        return automaticName(channel,input:input)
     }
     func channelNamesPayload() throws -> String { try runtimeChannelNames(preset:preset,devices:selected) }
     func openComputerLabels(_ channel: Int, input: Bool) {
-        guard let port=computerPorts(channel,input:input).first else { return }
-        openLabels(port:port,direction:input ? 0 : 1)
+        openLabels(port:Port(deviceUID:preset.deviceUID,channel:channel),direction:input ? 0 : 1)
     }
     func openLabels(port: Port? = nil, direction: Int? = nil) {
+        // Physical interface names are never editable in StudioPatch.
+        guard port == nil || port?.deviceUID == preset.deviceUID else { return }
         labelSelection=port
         labelDirection=(direction ?? tab) == 0 ? 0 : 1
         showingLabels=true
     }
     var labelEntries: [LabelEntry] {
-        let input = labelDirection == 0
-        let direction: PortDirection = input ? .input : .output
-        return selected.flatMap { device in
-            device.channelNames(input:input).enumerated().map {
-                LabelEntry(port:Port(deviceUID:device.uid,channel:$0.offset+1),direction:direction,
-                           name:$0.element,device:device.shortName)
+        let input=labelDirection == 0
+        return (0..<(input ? preset.inputCount : preset.outputCount)).map { index in
+            LabelEntry(port:Port(deviceUID:preset.deviceUID,channel:index+1),direction:input ? .input : .output,
+                       name:exposedChannelName(index+1,input:input),device:"\(input ? "To Computer" : "From Computer") \(index+1)")
+        }
+    }
+    func editLabel(_ label:ChannelLabel, completion:@escaping (Bool)->Void = { _ in }) {
+        performIO("Updating label in Core Audio…") {
+            guard label.port.deviceUID == self.preset.deviceUID else { throw self.labelError("The preset changed. Reopen the label editor.") }
+            do {
+                try await self.labelWriter(label)
+                if self.liveRuntime { try await self.refreshInventory() }
+                completion(true)
+            } catch { completion(false);throw error }
+        }
+    }
+    private func labelError(_ text:String) -> NSError { NSError(domain:"StudioPatch",code:34,userInfo:[NSLocalizedDescriptionKey:text]) }
+    func saveAsNew(name:String,copyLabels:Bool) async throws -> UUID {
+        guard !ioBusy else { throw labelError("An audio operation is still in progress.") }
+        let watchdog=beginIO("Creating preset…")
+        defer { endIO(watchdog) }
+        guard pendingLabelCopy == nil else { throw labelError("Finish or discard the pending label copy before creating another preset.") }
+        let sourceUID=preset.deviceUID
+        var labels:[ChannelLabel]=[]
+        if copyLabels {
+            let snapshot=try await labelReader(sourceUID)
+            guard snapshot.uid==sourceUID, snapshot.inputs.count==preset.inputCount, snapshot.outputs.count==preset.outputCount else {
+                throw labelError("Wait until Core Audio has applied the current channel counts before copying labels.")
             }
+            labels=snapshot.overrides
+        }
+        guard sourceUID == preset.deviceUID else { throw labelError("The preset changed before labels could be read.") }
+        let id=try saveSlot(name:name)
+        copyUID=preset.deviceUID
+        pendingLabelCopy=labels.isEmpty ? nil : labels
+        if !labels.isEmpty { try await applyPendingLabels() }
+        return id
+    }
+    func discardLabelCopy() { pendingLabelCopy=nil; copyUID=nil; labelNotice="" }
+    func retryLabelCopy() {
+        performIO("Copying channel labels…") { try await self.applyPendingLabels() }
+    }
+    private func applyPendingLabels() async throws {
+        guard let labels=pendingLabelCopy, let uid=copyUID, uid == preset.deviceUID else {
+            throw labelError("Load the destination preset before retrying its label copy.")
+        }
+        var ready=false
+        for _ in 0..<60 {
+            if let snapshot=try? await labelReader(uid), snapshot.uid==uid, snapshot.inputs.count==preset.inputCount, snapshot.outputs.count==preset.outputCount { ready=true;break }
+            try await Task.sleep(nanoseconds:250_000_000)
+        }
+        guard ready else {
+            labelNotice="Preset saved. Labels have not been copied: its audio device is unavailable. Retry after the device is ready."
+            throw labelError(labelNotice)
+        }
+        var remaining=labels
+        do {
+            for var label in labels {
+                label.port.deviceUID=uid
+                try await labelWriter(label)
+                remaining.removeFirst(); pendingLabelCopy=remaining
+            }
+        } catch {
+            pendingLabelCopy=remaining
+            labelNotice="Preset saved, but \(remaining.count) labels were not copied. Retry to finish. \(error.localizedDescription)"
+            throw labelError(labelNotice)
+        }
+        pendingLabelCopy=nil;copyUID=nil;labelNotice=""
+        if liveRuntime {
+            do { try await refreshInventory() }
+            catch { self.error="Labels were copied, but the display could not refresh: \(error.localizedDescription)" }
         }
     }
     var masterSampleRates: [Int] {
@@ -221,6 +298,7 @@ import CoreAudio
         guard discoverDevices else { return }
         do { try RuntimeConnection.launch() } catch { message="Could not start the background engine: \(error.localizedDescription)" }
         readRuntime()
+        statusObserver=DirectoryObserver(RuntimeConnection.status) { [weak self] in self?.readRuntime() }
         RuntimeConnection.requestNotifications()
         timer = Timer.scheduledTimer(withTimeInterval:1,repeats:true) { [weak self] _ in
             Task { @MainActor in self?.poll() }
@@ -301,9 +379,10 @@ import CoreAudio
             installed=snapshot.installed; inventoryKnown=true; running=snapshot.running
             message=snapshot.message
             runtimeLatencyDiagnostics=snapshot.latencyDiagnostics
-            if (8000...384000).contains(snapshot.rate) { preset.sampleRate=snapshot.rate }
+            if virtualDevice != nil, (8000...384000).contains(snapshot.rate) { preset.sampleRate=snapshot.rate }
             loadingRuntime=false
             if previousDevices != preset.knownDevices { try sessionStore.save(preset) }
+            migrateLegacyLabelsIfReady()
         } catch { message=error.localizedDescription }
     }
     private var libraryStore: PresetLibraryStore {
@@ -317,8 +396,26 @@ import CoreAudio
     var activePresetTitle: String { (activeSlot?.name ?? "Current configuration") + (presetIsModified ? " *" : "") }
     func restoreActivePreset() throws {
         presetSlots=try libraryStore.load()
+        if preset.channelLabels?.isEmpty == false || presetSlots.contains(where: { $0.configuration.channelLabels?.isEmpty == false }) {
+            for file in [sessionStore.url,libraryStore.url] where FileManager.default.fileExists(atPath:file.path) {
+                let backup=file.appendingPathExtension("before-core-audio-labels")
+                if !FileManager.default.fileExists(atPath:backup.path) { try FileManager.default.copyItem(at:file,to:backup) }
+            }
+        }
+        for index in presetSlots.indices {
+            if presetSlots[index].configuration.virtualDeviceUID == nil {
+                let id=presetSlots[index].id
+                presetSlots[index].configuration.virtualDeviceUID = id == preset.activePresetID ? preset.deviceUID : Preset.uid(for:id)
+            }
+            presetSlots[index].configuration.virtualDeviceName="StudioPatch (\(presetSlots[index].name))"
+        }
+        if let slot=activeSlot {
+            preset.virtualDeviceUID=slot.configuration.deviceUID
+            preset.virtualDeviceName=slot.configuration.deviceName
+            try commitSlots(presetSlots)
+        }
         if activeSlot == nil {
-            _ = try saveSlot(name:presetSlots.isEmpty ? "Default" : "Current configuration")
+            _ = try saveSlot(name:presetSlots.isEmpty ? "Default" : "Current configuration",initialIdentity:preset.deviceUID)
         }
     }
     func saveActivePreset() {
@@ -334,21 +431,29 @@ import CoreAudio
         try libraryStore.save(slots)
         presetSlots=slots
     }
-    func saveSlot(name: String, replacing id: UUID? = nil) throws -> UUID {
+    func saveSlot(name: String, replacing id: UUID? = nil, initialIdentity:String? = nil) throws -> UUID {
         let name=name.trimmingCharacters(in:.whitespacesAndNewlines)
         guard !name.isEmpty else { throw NSError(domain:"StudioPatch",code:31,userInfo:[NSLocalizedDescriptionKey:"Enter a preset name."]) }
         var configuration=preset
+        let slotID=id ?? UUID()
+        configuration.virtualDeviceUID = id.flatMap { selected in presetSlots.first { $0.id == selected }?.configuration.deviceUID } ?? initialIdentity ?? Preset.uid(for:slotID)
+        configuration.virtualDeviceName="StudioPatch (\(name))"
+        if initialIdentity == nil { configuration.channelLabels = id == preset.activePresetID && id != nil ? preset.channelLabels : nil }
         configuration.resizeChannels()
         configuration.activePresetID=nil
         try configuration.validate(forEditing:true)
         var slots=presetSlots
-        let slot=PresetSlot(id:id ?? UUID(),name:name,configuration:configuration,updatedAt:Date())
+        let slot=PresetSlot(id:slotID,name:name,configuration:configuration,updatedAt:Date())
         if let id {
             guard let index=slots.firstIndex(where:{$0.id==id}) else { throw NSError(domain:"StudioPatch",code:32,userInfo:[NSLocalizedDescriptionKey:"The preset no longer exists."]) }
             slots[index]=slot
         } else { slots.append(slot) }
         try commitSlots(slots)
-        preset.activePresetID=slot.id
+        configuration.activePresetID=slot.id
+        do { try sessionStore.save(configuration) }
+        catch { throw labelError("The preset was saved, but could not be activated: \(error.localizedDescription)") }
+        loadingRuntime=true; preset=configuration; loadingRuntime=false
+        saveStatus=""
         return slot.id
     }
     func renameSlot(_ id: UUID, name: String) throws {
@@ -357,7 +462,9 @@ import CoreAudio
         var slots=presetSlots
         guard let index=slots.firstIndex(where:{$0.id==id}) else { return }
         slots[index].name=name
+        slots[index].configuration.virtualDeviceName="StudioPatch (\(name))"
         try commitSlots(slots)
+        if preset.activePresetID==id { preset.virtualDeviceName=slots[index].configuration.deviceName }
     }
     func deleteSlot(_ id: UUID) throws {
         guard id != preset.activePresetID else {
@@ -371,9 +478,51 @@ import CoreAudio
         // Persist first so a failed write never applies a configuration only to the panel.
         var configuration=slot.configuration
         configuration.activePresetID=slot.id
+        configuration.virtualDeviceUID=slot.configuration.virtualDeviceUID ?? Preset.uid(for:slot.id)
+        configuration.virtualDeviceName="StudioPatch (\(slot.name))"
         try sessionStore.save(configuration)
         preset=configuration
         rememberDevices()
+    }
+
+    private var migrationAttemptUID: String?
+    func retryLegacyLabels() { migrationAttemptUID=nil; migrateLegacyLabelsIfReady() }
+    func migrateLegacyLabelsIfReady() {
+        guard !ioBusy, virtualDevice != nil, preset.channelLabels?.isEmpty == false,
+              migrationAttemptUID != preset.deviceUID else { return }
+        let original=preset, uid=preset.deviceUID
+        migrationAttemptUID=uid
+        performIO("Moving legacy labels to Core Audio…") {
+            do {
+                let snapshot=try await self.labelReader(uid)
+                let defaults=try JSONSerialization.jsonObject(with:Data(runtimeChannelNames(preset:original,devices:self.selected).utf8)) as! [String:[String]]
+                guard snapshot.defaultInputs==defaults["inputs"], snapshot.defaultOutputs==defaults["outputs"] else {
+                    self.migrationAttemptUID=nil; return // Wait for the service to publish this routing's defaults.
+                }
+                let legacy=try JSONSerialization.jsonObject(with:Data(runtimeChannelNames(preset:original,devices:self.selected,includeLegacyLabels:true).utf8)) as! [String:[String]]
+                for input in [true,false] {
+                    let values=legacy[input ? "inputs" : "outputs"] ?? []
+                    let base=input ? snapshot.defaultInputs : snapshot.defaultOutputs
+                    let effective=input ? snapshot.inputs : snapshot.outputs
+                    for (index,text) in values.enumerated() where base.indices.contains(index) && effective.indices.contains(index) && text != base[index] && effective[index] == base[index] {
+                        try await self.labelWriter(ChannelLabel(port:Port(deviceUID:uid,channel:index+1),direction:input ? .input : .output,text:text))
+                    }
+                }
+                guard self.preset.deviceUID==uid else { throw self.labelError("The preset changed during label migration.") }
+                var slots=self.presetSlots
+                if let index=slots.firstIndex(where: { $0.id == original.activePresetID }) { slots[index].configuration.channelLabels=nil }
+                try self.commitSlots(slots)
+                self.preset.channelLabels=nil
+                self.labelNotice="Legacy labels on routed, exposed channels were moved to Core Audio. Original files, including unused labels, are preserved beside the session as .before-core-audio-labels backups."
+                if self.liveRuntime {
+                    do { try await self.refreshInventory() }
+                    catch { self.error="Labels were migrated, but the display could not refresh: \(error.localizedDescription)" }
+                }
+            } catch {
+                self.labelNotice="Legacy labels have been preserved for migration. \(error.localizedDescription)"
+                self.error=self.labelNotice
+            }
+        }
     }
 
 }
@@ -393,8 +542,8 @@ struct ContentView: View {
                     }
                     .frame(maxWidth:.infinity,alignment:.leading)
                     Text(m.activePresetTitle).lineLimit(1).help(m.activePresetTitle)
-                    Button("Save",action:m.saveActivePreset).disabled(!m.presetIsModified || m.activeSlot == nil)
-                    Button("Presets…",action:m.openPresets)
+                    Button("Save",action:m.saveActivePreset).disabled(m.ioBusy || !m.presetIsModified || m.activeSlot == nil)
+                    Button("Presets…",action:m.openPresets).disabled(m.ioBusy)
                 }
                 HStack {
                     Picker("Direction",selection:$m.tab) { Text("To Computer").tag(0); Text("From Computer").tag(1) }.pickerStyle(.segmented).labelsHidden().fixedSize()
@@ -408,6 +557,16 @@ struct ContentView: View {
                         .font(.caption).foregroundStyle(.orange)
                 }
                 if m.listMode { channelList } else { matrix }
+                if !m.labelNotice.isEmpty {
+                    HStack {
+                        Text(m.labelNotice).font(.caption).foregroundStyle(.orange)
+                        if m.preset.channelLabels?.isEmpty == false { Button("Retry migration",action:m.retryLegacyLabels).disabled(m.ioBusy) }
+                        if m.pendingLabelCopy != nil {
+                            Button("Retry label copy",action:m.retryLabelCopy).disabled(m.ioBusy)
+                            Button("Discard remaining copy") { m.discardLabelCopy() }.disabled(m.ioBusy)
+                        }
+                    }
+                }
                 if !m.ioStatus.isEmpty {
                     Text(m.ioStatus).font(.callout).foregroundStyle(.orange).lineLimit(2)
                 }
@@ -586,9 +745,18 @@ struct PresetLibraryEditor: View {
     @State private var overwrite = false
     @State private var deleting = false
     @State private var renaming = false
+    @State private var copying = false
     private var slot: PresetSlot? { m.presetSlots.first {$0.id == selected} }
     private func perform(_ action: () throws -> Void) {
         do { try action(); failure="" } catch { failure=error.localizedDescription }
+    }
+    private func create(copyLabels:Bool) {
+        Task { @MainActor in
+            do {
+                selected=try await m.saveAsNew(name:newName,copyLabels:copyLabels)
+                editedName=newName.trimmingCharacters(in:.whitespacesAndNewlines);newName="";failure=""
+            } catch { failure=error.localizedDescription }
+        }
     }
     var body: some View {
         VStack(alignment:.leading,spacing:16) {
@@ -601,7 +769,7 @@ struct PresetLibraryEditor: View {
             HStack {
                 TextField("New preset name",text:$newName).textFieldStyle(.roundedBorder)
                 Button("Save current as new") {
-                    perform { selected=try m.saveSlot(name:newName); editedName=newName.trimmingCharacters(in:.whitespacesAndNewlines); newName="" }
+                    copying=true
                 }.disabled(newName.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty)
             }
             List {
@@ -644,6 +812,12 @@ struct PresetLibraryEditor: View {
                 .font(.caption).foregroundStyle(.secondary)
             if !failure.isEmpty { Text(failure).foregroundStyle(.orange).font(.callout) }
         }.padding(24).frame(width:760,height:510)
+        .disabled(m.ioBusy)
+        .alert("Copy channel labels?",isPresented:$copying) {
+            Button("Copy labels") { create(copyLabels:true) }
+            Button("Without labels") { create(copyLabels:false) }
+            Button("Cancel",role:.cancel) { }
+        } message: { Text("The new preset gets its own audio device. Copy current labels that differ from its automatic routing names?") }
         .alert("Rename preset",isPresented:$renaming) {
             TextField("Preset name",text:$editedName)
             Button("Cancel",role:.cancel) { }
@@ -700,51 +874,54 @@ struct DeviceOrderEditor: View {
 }
 struct LabelEditor: View {
     @ObservedObject var m: Model
-    @FocusState private var focusedPort: Port?
     var body: some View {
         VStack(alignment:.leading,spacing:16) {
             HStack {
-                Text("Custom channel labels").font(.title2.weight(.semibold))
+                Text("StudioPatch channel labels").font(.title2.weight(.semibold))
                 Spacer()
                 Button("Done") { m.showingLabels=false }.keyboardShortcut(.defaultAction)
             }
-            Text("Labels appear alongside the original channel names. Changes are saved automatically.")
+            Text("Labels are stored by Core Audio for this preset's device. Apply an empty label to use its routing name. Physical interface names are read-only here.")
                 .font(.callout).foregroundStyle(.secondary)
-            Picker("Channels",selection:Binding(get:{m.labelDirection},set:{m.labelDirection=$0;m.labelSelection=nil;focusedPort=nil})) {
-                Text("Hardware inputs").tag(0)
-                Text("Hardware outputs").tag(1)
+            Picker("Channels",selection:$m.labelDirection) {
+                Text("To Computer").tag(0)
+                Text("From Computer").tag(1)
             }.pickerStyle(.segmented)
             ScrollViewReader { proxy in
                 ScrollView {
                     LazyVStack(alignment:.leading,spacing:8) {
                         ForEach(m.labelEntries) { entry in
-                            HStack {
-                                VStack(alignment:.leading,spacing:2) {
-                                    Text(entry.name)
-                                    Text(entry.device).font(.caption).foregroundStyle(.secondary)
-                                }.frame(width:200,alignment:.leading)
-                                TextField("Custom label",text:Binding(
-                                    get:{m.preset.label(for:entry.port,direction:entry.direction)},
-                                    set:{m.preset.setLabel($0,for:entry.port,direction:entry.direction)}))
-                                    .textFieldStyle(.roundedBorder)
-                                    .focused($focusedPort,equals:entry.port)
-                                    .accessibilityLabel("Label for \(entry.device) \(entry.direction == .input ? "input" : "output") \(entry.name)")
-                            }
-                            .padding(8)
-                            .background(m.labelSelection == entry.port ? Color.cyan.opacity(0.16) : Color.clear,in:RoundedRectangle(cornerRadius:6))
-                            .id(entry.port)
+                            ChannelLabelRow(m:m,entry:entry).id(entry.port)
                         }
-                        if m.labelEntries.isEmpty { Text("No channels to label in this direction.").foregroundStyle(.secondary) }
-                    }.padding(.trailing,10)
-                }
-                .onAppear {
-                    if let selected=m.labelSelection {
-                        proxy.scrollTo(selected,anchor:.center)
-                        DispatchQueue.main.async { focusedPort=selected }
-                    }
-                }
+                    }.id(m.labelDirection)
+                }.onAppear { if let selected=m.labelSelection { proxy.scrollTo(selected,anchor:.center) } }
             }
-        }.padding(24).frame(width:680,height:580)
+            if !m.error.isEmpty { Text(m.error).font(.caption).foregroundStyle(.orange) }
+        }.padding(24).frame(width:740,height:580)
+    }
+}
+struct ChannelLabelRow: View {
+    @ObservedObject var m: Model
+    let entry: LabelEntry
+    @State private var draft=""
+    @State private var edited=false
+    private func apply() {
+        m.editLabel(ChannelLabel(port:entry.port,direction:entry.direction,text:draft)) { success in if success { edited=false } }
+    }
+    var body: some View {
+        HStack {
+            VStack(alignment:.leading,spacing:2) {
+                Text(entry.device)
+                Text(entry.name).font(.caption).foregroundStyle(.secondary).lineLimit(2)
+            }.frame(width:220,alignment:.leading)
+            TextField("Empty uses routing name",text:Binding(get:{draft},set:{draft=$0;edited=true}))
+                .textFieldStyle(.roundedBorder).onSubmit { if edited && !m.ioBusy && m.virtualDevice != nil { apply() } }
+                .accessibilityLabel("Label for \(entry.device)")
+            Button("Apply",action:apply).disabled(!edited || m.ioBusy || m.virtualDevice == nil)
+        }.padding(8)
+        .background(m.labelSelection == entry.port ? Color.cyan.opacity(0.16) : Color.clear,in:RoundedRectangle(cornerRadius:6))
+        .onAppear { draft=entry.name }
+        .onChange(of:entry.name) { _,value in if !edited { draft=value } }
     }
 }
 final class AppDelegate: NSObject, NSApplicationDelegate {

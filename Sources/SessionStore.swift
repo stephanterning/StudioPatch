@@ -55,6 +55,7 @@ final class PresetLibraryStore {
     }
     private func validate(_ slots: [PresetSlot]) throws {
         guard Set(slots.map(\.id)).count == slots.count,
+              Set(slots.map { $0.configuration.virtualDeviceUID ?? Preset.uid(for:$0.id) }).count == slots.count,
               slots.allSatisfy({ !$0.name.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty }) else {
             throw NSError(domain:"StudioPatch",code:30,userInfo:[NSLocalizedDescriptionKey:"Invalid preset library."])
         }

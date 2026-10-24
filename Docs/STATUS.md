@@ -4,6 +4,14 @@
 
 StudioPatch has been developed and tested on its author's studio setup, and its architecture has been through a full review (all 19 findings addressed or explicitly accepted). It has **not** been qualified as a general release: it has been tested on one Mac with one combination of interfaces, there are no signed or notarized builds, and several failure modes have only been tested in simulation.
 
+## Preset identity and labels — 2026-10-24
+
+The working tree implements per-preset virtual UIDs and Core Audio-owned channel labels, including a copy choice on Save current as new. The updated driver/app must be installed together. The signed package was installed on 2026-10-24; a user-initiated Mac restart is pending to load the new driver and broker. The runtime is stopped until next login.
+
+Setting, clearing, copying and channel-name notifications passed live Core Audio probes on disposable private aggregates in both directions. Driver/model tests cover identity changes, retiring the old endpoint, no dirty marker for labels, migration and partial-copy failures. Service integration tests cover UID changes at unchanged audio format and display-name changes without an engine restart.
+
+Native StudioPatch label retention across preset disappearance/reappearance, shrink/grow and reboot remains unverified with the updated installed driver. Audio MIDI Setup/DAW refresh of the new device identity also needs that acceptance run. Explicit destroy/recreate of a **private aggregate** did not retain labels; that experiment does not prove how HAL treats a native driver endpoint. See [verification details](LABEL-VERIFICATION.md).
+
 ## Tested setup
 
 - Apple Silicon Mac, macOS 14 or later.

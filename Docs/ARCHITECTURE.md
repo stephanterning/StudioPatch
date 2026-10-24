@@ -57,7 +57,8 @@ The service talks to the driver through custom Core Audio properties on the virt
 | Selector | Purpose |
 |---|---|
 | `spcf` | Virtual device configuration (channel counts, rate, buffer). |
-| `spnm` | Channel names shown in DAWs. Applied without reconfiguring audio. |
+| `spnm` | Routing-derived default channel names. HAL manual aliases take precedence. Applied without reconfiguring audio. |
+| `spdn` | Preset device display name, independent of its stable UID. |
 | `sprt` / `sprq` | Rates the Sync Source supports / a sample-rate change requested by a DAW. |
 | `splt` | Input and output latency reports, bound to a transport generation. |
 | `spts` | Transport status (`connecting`/`ready`) and connection attempts. |
@@ -99,11 +100,19 @@ Reporting is referenced to the Sync Source on purpose. Other interfaces can have
 - If the driver's plug-in lookup fails, the service falls back to enumerating plug-in bundle IDs.
 - **Bounded self-restart.** If Core Audio reports a bad-object error at least three times over ten seconds, or a control call is blocked for 30 seconds, the service replaces its own process image. `recovery-attempt.json` limits this to once per ten minutes across restarts. A second failure in that window stops the service with a successful exit, so launchd does not loop, and the panel shows the reason. StudioPatch never restarts Core Audio, the broker or other processes.
 
+## Preset device identity and labels
+
+Presets store a stable `virtualDeviceUID` and the current `virtualDeviceName`. The UID is included in the engine payload; the display name is excluded so rename only publishes metadata. Configuration wire version 2 carries the UID, while version 1 remains readable for the legacy device. A UID change retires/mutes the old endpoint and removes/adds native driver objects. An unchanged UID keeps the existing endpoint during format changes. The shared transport memory layout is unchanged.
+
+The service publishes routing-derived defaults through `spnm` and display names through `spdn`. The panel writes manual aliases using HAL’s `kAudioObjectPropertyElementName`; an empty CFString clears an alias. Writes verify the expected active UID and channel direction/count. No physical-interface name setter is exposed. The panel reads the effective virtual names from inventory. Wildcard-element listeners wake the service, and a file observer delivers its inventory snapshot to the panel without waiting for the polling timer. Timers remain fallback paths.
+
+Manual aliases are not part of preset comparison or new preset serialization. Save-as-new obtains effective/default names before switching and copies only differing strings to the new UID. Pending transfers live in memory and errors report partial completion. Legacy migration and the outstanding native HAL lifecycle checks are described in [the design](PRESET-IDENTITY-AND-LABELS.md) and [verification record](LABEL-VERIFICATION.md).
+
 ## Files on disk
 
 | Location | Written by | Contents |
 |---|---|---|
-| `~/Library/Application Support/StudioPatch/last-session.json` | Panel | Current configuration: channel counts, routes (including inactive ones), interfaces, labels, display order, active preset. |
+| `~/Library/Application Support/StudioPatch/last-session.json` | Panel | Current configuration: channel counts, routes (including inactive ones), interfaces, display order, active preset UID/display name. Legacy labels are retained only until migration. |
 | `~/Library/Application Support/StudioPatch/presets.json` | Panel | Named presets. |
 | `~/Library/Application Support/StudioPatch/runtime-status.json` | Service | Live status, device inventory and timing diagnostics. |
 | `~/Library/Application Support/StudioPatch/recovery-attempt.json` | Service | Time of the last automatic self-restart. Do not delete it to force retries. |

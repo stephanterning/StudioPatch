@@ -14,13 +14,13 @@ static OSStatus recordChanges(AudioServerPlugInHostRef, AudioObjectID, UInt32 co
 }
 static CFPropertyListRef savedNames=nullptr;
 static OSStatus saveNames(AudioServerPlugInHostRef, CFStringRef key, CFPropertyListRef value) {
-    assert(CFEqual(key,CFSTR("channel-names-v1")));
+    assert(CFEqual(key,CFSTR("channel-names-v2")));
     if (savedNames) CFRelease(savedNames);
     savedNames=CFRetain(value); return noErr;
 }
 static OSStatus loadNames(AudioServerPlugInHostRef, CFStringRef key, CFPropertyListRef* value) {
     *value=nullptr;
-    if (CFEqual(key,CFSTR("channel-names-v1")) && savedNames) *value=CFRetain(savedNames);
+    if (CFEqual(key,CFSTR("channel-names-v2")) && savedNames) *value=CFRetain(savedNames);
     return noErr;
 }
 static std::string readName(const std::shared_ptr<aspl::Device>& d, bool input, UInt32 channel) {
@@ -99,6 +99,43 @@ static void testChannelNames() {
     d=p->GetDeviceByIndex(0);
     bad={kAudioObjectPropertyElementName,kAudioObjectPropertyScopeOutput,1};
     assert(!d->HasProperty(d->GetID(),0,&bad));
+}
+
+static void testPresetIdentity() {
+    using namespace patch;
+    auto ctx=std::make_shared<aspl::Context>(std::make_shared<aspl::Tracer>(aspl::Tracer::Mode::Noop));
+    auto plugin=std::make_shared<PatchPlugin>(ctx);
+    auto a=Config::parse("2 2 3 96000 256 se.studiopatch.preset.a");
+    assert(Config::parse(a.encode()).uid==a.uid);
+    assert(plugin->configure(a,false)==noErr);
+    auto first=plugin->GetDeviceByIndex(0);
+    assert(first->GetDeviceUID()==a.uid);
+    assert(plugin->setNames(ChannelNames{{"A","B"},{"C","D","E"}},false)==noErr);
+    AudioObjectPropertyAddress address{DeviceNameProperty,kAudioObjectPropertyScopeGlobal,0};
+    CFStringRef name=CFSTR("StudioPatch (Studio A)");
+    assert(plugin->SetPropertyData(plugin->GetID(),0,&address,0,nullptr,sizeof(name),&name)==noErr);
+    assert(plugin->GetDeviceByIndex(0)->GetID()==first->GetID());
+    assert(first->GetName()=="StudioPatch (Studio A)");
+    assert(first->GetDeviceUID()==a.uid && readName(first,true,1)=="A");
+    // Keep an old client alive through a UID switch: it must be retired/muted.
+    auto oldHandler=first->GetControlHandler();
+    assert(oldHandler->OnStartIO()==noErr);
+    auto b=a;b.uid="se.studiopatch.preset.b";
+    assert(plugin->configure(b,false)==noErr);
+    auto second=plugin->GetDeviceByIndex(0);
+    assert(second->GetID()!=first->GetID() && second->GetDeviceUID()==b.uid);
+    assert(!first->GetIsAlive() && oldHandler->OnStartIO()!=noErr);
+    oldHandler->OnStopIO();
+    assert(readName(second,true,1)=="To Computer 1"); // No default-name bleed.
+    assert(plugin->configure(a,false)==noErr);
+    assert(plugin->GetDeviceByIndex(0)->GetDeviceUID()==a.uid);
+    auto restoredContext=std::make_shared<aspl::Context>(std::make_shared<aspl::Tracer>(aspl::Tracer::Mode::Noop));
+    auto restored=std::make_shared<PatchPlugin>(restoredContext);
+    assert(restored->restoreConfiguration(Config::parse(a.encode()))==noErr);
+    assert(restored->GetDeviceByIndex(0)->GetDeviceUID()==a.uid);
+    for(auto raw:{"2 2 3 96000 256 hardware.uid","2 2 3 96000 256 se.studiopatch.preset.a extra"}) {
+        bool failed=false;try{Config::parse(raw);}catch(...){failed=true;}assert(failed);
+    }
 }
 
 static void testStreamNotificationsDoNotBlockSetter() {
@@ -328,13 +365,14 @@ static void testIndependentLifecycle() {
 }
 
 int main() {
+    testPresetIdentity();
     assert(patch::supportedSampleRate(8000) && patch::supportedSampleRate(192000) && patch::supportedSampleRate(384000));
     assert(!patch::supportedSampleRate(7999) && !patch::supportedSampleRate(384001) && !patch::supportedSampleRate(48000.5));
     assert(!patch::supportedSampleRate(NAN) && !patch::supportedSampleRate(INFINITY));
     {
         auto direct=patch::makeDriver();auto plugin=direct->GetPlugin();assert(plugin->GetDeviceCount()==1);
         CFStringRef value=CFSTR("0");
-        for(auto key:{patch::ConfigProperty,patch::NamesProperty,patch::RatesProperty,patch::RateRequestProperty,patch::LatencyProperty}) {
+        for(auto key:{patch::DeviceNameProperty,patch::ConfigProperty,patch::NamesProperty,patch::RatesProperty,patch::RateRequestProperty,patch::LatencyProperty}) {
             AudioObjectPropertyAddress a{key,kAudioObjectPropertyScopeGlobal,0};
             for(auto pid:{0,getpid()})assert(plugin->SetPropertyData(plugin->GetID(),pid,&a,0,nullptr,sizeof(value),&value)==kAudioHardwareIllegalOperationError);
         }

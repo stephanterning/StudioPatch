@@ -114,8 +114,10 @@ patch::Config config(NSDictionary* d) {
             throw std::runtime_error("Invalid numeric configuration");
         return std::to_string([v longLongValue]);
     };
-    return patch::Config::parse("1 "+integer(@"inputCount")+" "+integer(@"outputCount")+" "+
+    auto c=patch::Config::parse("1 "+integer(@"inputCount")+" "+integer(@"outputCount")+" "+
         integer(@"sampleRate")+" 256");
+    if([d[@"virtualDeviceUID"] isKindOfClass:NSString.class]) c.uid=[d[@"virtualDeviceUID"] UTF8String];
+    return patch::Config::parse(c.encode());
 }
 std::string currentConfig() {
     auto id=pluginID(); auto a=address(patch::ConfigProperty);
@@ -443,7 +445,7 @@ extern "C" char* SPInventory() { @autoreleasepool {
         std::string config;
         // Driver health must not gate hardware discovery, especially during hot unplug.
         NSNumber* driverError=nil;
-        try { installed=translate(@(patch::DeviceUID))!=0; }
+        try { config=currentConfig(); installed=translate(@(patch::Config::parse(config).uid.c_str()))!=0; }
         catch(const HALError& e) { driverError=@(e.status); }
         catch(const std::exception&) { }
         if(installed) {
@@ -532,6 +534,7 @@ extern "C" char* SPSetChannelNames(const char* raw) { @autoreleasepool {
         auto encoded=names.encode();
         authorizeWrites();
         const auto c=patch::Config::parse(currentConfig());
+        if(d[@"uid"] && ![d[@"uid"] isEqual:@(c.uid.c_str())]) return response(@{@"pending":@YES});
         // Width edits are pending until Apply; never assign them to the old layout.
         if (names.inputs.size()!=c.inputs || names.outputs.size()!=c.outputs)
             return response(@{@"pending":@YES});
@@ -541,6 +544,62 @@ extern "C" char* SPSetChannelNames(const char* raw) { @autoreleasepool {
         auto result=AudioObjectSetPropertyData(id,&a,0,nullptr,sizeof(value),&value);
         CFRelease(value);
         check(result,"Could not update the StudioPatch device's channel names");
+        NSString* displayName=d[@"deviceName"];
+        if([displayName isKindOfClass:NSString.class] && ![stringProperty(id,patch::DeviceNameProperty) isEqual:displayName]) {
+            auto property=address(patch::DeviceNameProperty); CFStringRef name=(__bridge CFStringRef)displayName;
+            check(AudioObjectSetPropertyData(id,&property,0,nullptr,sizeof(name),&name),"Update StudioPatch device name");
+        }
+        return response(@{@"ok":@YES});
+    } catch(const std::exception& e) { return failure(e); }
+} }
+// HAL owns and persists element-name aliases. Never route these writes through
+// the driver's default-name property or write names on a physical interface.
+extern "C" char* SPReadChannelLabels(const char* uid) { @autoreleasepool {
+    std::lock_guard lock(control);
+    try {
+        auto c=patch::Config::parse(currentConfig());
+        if(!uid || c.uid!=uid)throw std::runtime_error("The preset device is still changing. Try again when it is available.");
+        auto device=translate(@(uid));
+        if(!device)throw std::runtime_error("The preset device is unavailable.");
+        NSString* rawDefaults=stringProperty(pluginID(),patch::NamesProperty);
+        auto defaults=patch::ChannelNames::parse(rawDefaults.UTF8String);
+        if(defaults.inputs.size()!=c.inputs || defaults.outputs.size()!=c.outputs)
+            throw std::runtime_error("The preset channel names are still changing.");
+        NSMutableArray* inputs=[NSMutableArray array]; NSMutableArray* outputs=[NSMutableArray array];
+        NSMutableArray* baseInputs=[NSMutableArray array]; NSMutableArray* baseOutputs=[NSMutableArray array];
+        for(bool input:{true,false}) {
+            auto& names=input?defaults.inputs:defaults.outputs;
+            for(size_t i=0;i<names.size();++i) {
+                NSString* base=names[i].empty() ? [NSString stringWithFormat:@"%s %zu",input?"To Computer":"From Computer",i+1] : @(names[i].c_str());
+                [(input?baseInputs:baseOutputs) addObject:base];
+                [(input?inputs:outputs) addObject:stringProperty(device,kAudioObjectPropertyElementName,
+                    input?kAudioObjectPropertyScopeInput:kAudioObjectPropertyScopeOutput,UInt32(i+1))];
+            }
+        }
+        // A concurrent routing/default-name update must not be mistaken for
+        // manual overrides and copied back as sticky aliases.
+        if(currentConfig()!=c.encode() || translate(@(uid))!=device ||
+           ![rawDefaults isEqual:stringProperty(pluginID(),patch::NamesProperty)])
+            throw std::runtime_error("The preset or its routing names changed while reading labels. Try again.");
+        return response(@{@"uid":@(uid),@"inputs":inputs,@"outputs":outputs,@"defaultInputs":baseInputs,@"defaultOutputs":baseOutputs});
+    } catch(const std::exception& e) { return failure(e); }
+} }
+extern "C" char* SPSetChannelLabel(const char* raw) { @autoreleasepool {
+    std::lock_guard lock(control);
+    try {
+        auto d=json(raw);auto c=patch::Config::parse(currentConfig());
+        if(![d[@"uid"] isEqual:@(c.uid.c_str())])throw std::runtime_error("The preset changed. The label was not written.");
+        NSString* direction=d[@"direction"];NSString* text=d[@"text"];
+        if(![direction isEqual:@"input"] && ![direction isEqual:@"output"])throw std::runtime_error("Invalid channel direction.");
+        bool input=[direction isEqual:@"input"];auto channel=[d[@"channel"] unsignedIntValue];
+        if(![text isKindOfClass:NSString.class] || [text lengthOfBytesUsingEncoding:NSUTF8StringEncoding]>4096 ||
+            channel<1 || channel>(input?c.inputs:c.outputs))throw std::runtime_error("Invalid channel label.");
+        auto device=translate(@(c.uid.c_str()));
+        if(!device)throw std::runtime_error("The preset device is unavailable.");
+        auto a=address(kAudioObjectPropertyElementName,input?kAudioObjectPropertyScopeInput:kAudioObjectPropertyScopeOutput,channel);
+        CFStringRef value=(__bridge CFStringRef)text;
+        check(AudioObjectSetPropertyData(device,&a,0,nullptr,sizeof(value),&value),"Update channel label in Core Audio");
+        if(currentConfig()!=c.encode() || translate(@(c.uid.c_str()))!=device)throw std::runtime_error("The preset changed while writing. Check its labels before continuing.");
         return response(@{@"ok":@YES});
     } catch(const std::exception& e) { return failure(e); }
 } }

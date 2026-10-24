@@ -44,7 +44,9 @@ import CoreAudio
         observer?.update(Set(devices.map(\.id)));inventoryDirty=false;lastInventory=Date()
     }
     func publishChannelNames(force:Bool=false) async throws {
-        let raw=try runtimeChannelNames(preset:preset,devices:selected)
+        var names=try JSONSerialization.jsonObject(with:Data(runtimeChannelNames(preset:preset,devices:selected).utf8)) as! [String:Any]
+        names["uid"]=preset.deviceUID; names["deviceName"]=preset.deviceName
+        let raw=String(decoding:try JSONSerialization.data(withJSONObject:names,options:.sortedKeys),as:UTF8.self)
         guard force || raw != publishedNames else {return}
         let result=try await AudioWorker.call {raw.withCString {SPSetChannelNames($0)}}
         if (try JSONSerialization.jsonObject(with:result) as? [String:Any])?["ok"] as? Bool == true {publishedNames=raw}
@@ -87,6 +89,22 @@ import CoreAudio
                 }
                 try await refreshInventory()
                 guard Date()>=nextRuntimeAttempt else { return }
+                // A disconnected studio still has its own (silent) virtual device.
+                // Do not leave the previous preset exposed while waiting for hardware.
+                if installed, preset.inputCount+preset.outputCount>0,
+                   preset.devices.isEmpty || selected.contains(where: { !isAvailable($0.uid) }) {
+                    await AudioWorker.stop(); running=false; appliedRuntime="";runtimeLatencyDiagnostics=nil
+                    let fields=driverConfiguration.split(separator:" ")
+                    let uid=fields.first == "2" && fields.count==6 ? String(fields[5]) : Preset.virtualUID
+                    let shape=fields.prefix(5).compactMap { Int($0) }
+                    if uid != preset.deviceUID || shape.count<5 || shape[1] != preset.inputCount || shape[2] != preset.outputCount || shape[3] != preset.sampleRate {
+                        let raw=try payload()
+                        _ = try await AudioWorker.call { raw.withCString { SPConfigure($0) } }
+                        inventoryDirty=true;try await refreshInventory()
+                        publishedNames=nil
+                    }
+                    try await publishChannelNames()
+                }
                 try requireAvailableDevices()
                 if let status=driverErrorStatus {
                     throw NSError(domain:"StudioPatch.CoreAudio",code:status,userInfo:[NSLocalizedDescriptionKey:
@@ -111,8 +129,10 @@ import CoreAudio
                 if state.invalidated || !state.running { appliedRuntime=""; running=false }
                 if raw != appliedRuntime || !running || request>0 {
                     guard Date()>=nextRuntimeAttempt else { return }
-                    let current=driverConfiguration.split(separator:" ").compactMap { Int($0) }
-                    let formatChanged = current.count < 4 || current[1] != preset.inputCount || current[2] != preset.outputCount || current[3] != preset.sampleRate
+                    let fields=driverConfiguration.split(separator:" ")
+                    let current=fields.prefix(5).compactMap { Int($0) }
+                    let currentUID=fields.first == "2" && fields.count == 6 ? String(fields[5]) : Preset.virtualUID
+                    let formatChanged = currentUID != preset.deviceUID || current.count < 4 || current[1] != preset.inputCount || current[2] != preset.outputCount || current[3] != preset.sampleRate
                         || selected.contains { abs($0.sampleRate-Double(preset.sampleRate)) > 0.5 }
                     let format="\(preset.sampleRate) Hz · \(preset.inputCount) To Computer · \(preset.outputCount) From Computer (\(selected.map(\.name).joined(separator:", ")))"
                     if formatChanged || pendingFormatNotification != nil { pendingFormatNotification=format }

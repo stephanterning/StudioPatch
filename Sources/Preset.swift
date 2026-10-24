@@ -39,13 +39,18 @@ struct Preset: Codable {
     // Missing in older sessions means automatic; retain the manual value separately.
     var automaticTransportMargin: Bool? = true
     var activePresetID: UUID? = nil
+    var virtualDeviceUID: String? = nil
+    var virtualDeviceName: String? = nil
+    var deviceUID: String { virtualDeviceUID ?? Self.virtualUID }
+    var deviceName: String { virtualDeviceName ?? "StudioPatch" }
+    static func uid(for id: UUID) -> String { "se.studiopatch.preset." + id.uuidString.lowercased() }
     var masterUID = ""
     var devices: [Member] = []
     var knownDevices: [KnownDevice]? = nil
     var deviceDisplayOrder: [String]? = nil
     var inputs: [Port?] = Array(repeating: nil, count: 18)
     var outputs: [Playback] = []
-    // Optional so presets and sessions saved before labels still decode.
+    // Legacy migration input only. New labels are written directly to Core Audio.
     var channelLabels: [ChannelLabel]? = nil
     // Older sessions inherit the former global setting until each device has its own lock.
     func isSyncLocked(_ uid: String) -> Bool {
@@ -54,13 +59,6 @@ struct Preset: Codable {
     func label(for port: Port, direction: PortDirection) -> String {
         guard port.deviceUID != Self.virtualUID else { return "" }
         return channelLabels?.first { $0.port == port && $0.direction == direction }?.text ?? ""
-    }
-    mutating func setLabel(_ text: String, for port: Port, direction: PortDirection) {
-        guard port.deviceUID != Self.virtualUID else { return }
-        var labels = channelLabels ?? []
-        labels.removeAll { $0.port == port && $0.direction == direction }
-        if !text.isEmpty { labels.append(ChannelLabel(port:port,direction:direction,text:text)) }
-        channelLabels = labels.isEmpty ? nil : labels
     }
     // Routing is persistent; exposed widths only select its active subset.
     mutating func resizeChannels() {
@@ -83,6 +81,8 @@ struct Preset: Codable {
             configuration.delayFrames = 256 // Fixed legacy wire placeholder; not a timing policy.
             configuration.automaticTransportMargin = nil
             configuration.activePresetID = nil
+            configuration.virtualDeviceUID = deviceUID
+            configuration.virtualDeviceName = nil
             configuration.deviceDisplayOrder = nil
             configuration.knownDevices = nil
             configuration.channelLabels = nil
@@ -95,6 +95,9 @@ struct Preset: Codable {
     func comparisonData() -> Data? {
         var configuration=self
         configuration.activePresetID=nil
+        configuration.virtualDeviceUID=nil
+        configuration.virtualDeviceName=nil
+        configuration.channelLabels=nil
         // Discovery metadata is refreshed by Core Audio, not edited by the user.
         configuration.knownDevices=nil
         configuration.resizeChannels()
@@ -102,7 +105,11 @@ struct Preset: Codable {
         return try? encoder.encode(configuration)
     }
     func validate(forEditing: Bool = false) throws {
-        guard (0...128).contains(inputCount), (0...128).contains(outputCount), (forEditing || inputCount + outputCount > 0),
+        guard (virtualDeviceUID == nil || deviceUID == Self.virtualUID ||
+               (deviceUID.hasPrefix("se.studiopatch.preset.") && deviceUID.utf8.count <= 100 &&
+                deviceUID.unicodeScalars.allSatisfy { CharacterSet(charactersIn:"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.-").contains($0) })),
+              deviceName.utf8.count <= 4096, !deviceName.contains("\0"),
+              (0...128).contains(inputCount), (0...128).contains(outputCount), (forEditing || inputCount + outputCount > 0),
               (8000...384000).contains(sampleRate), [32,64,128,256,512,1024].contains(bufferFrames),
               inputs.count >= inputCount, inputs.count <= 128,
               Set(devices.map(\.uid)).count == devices.count,
