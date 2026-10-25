@@ -41,6 +41,7 @@ Use the **To Computer / From Computer** switch to pick a direction. Click a cell
 - **Unlimited fan-out.** One source can feed any number of destinations.
 - Channel numbers start at **1**. Real channel names come from each interface's driver (for example Analog 9, ADAT 3, MADI 17).
 - Row and column headers stay visible while you scroll. Hovering highlights the row and column under the pointer.
+- The **Source** column between each destination and the matrix shows its selected source (for example `← UFX III · Analog 1`). It stays visible while scrolling, updates when routing changes, and is blank for unconnected destinations. Saved routes involving an unavailable interface appear grey, like their matrix cells.
 - **Channel list** shows the same routing as a list with a menu per destination, which can be easier for large setups.
 - **Device order…** decides which interface's channels appear first in the matrix and list. This only affects the display and never interrupts audio.
 

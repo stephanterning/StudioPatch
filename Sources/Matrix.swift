@@ -18,7 +18,8 @@ struct Matrix: NSViewRepresentable {
 }
 
 final class FrozenMatrixView: NSView {
-    let rowWidth: CGFloat = 235, headerHeight: CGFloat = 170, cell: CGFloat = 32
+    let rowWidth: CGFloat = 235, sourceWidth: CGFloat = 205, headerHeight: CGFloat = 170, cell: CGFloat = 32
+    var frozenWidth: CGFloat { rowWidth+sourceWidth }
     let scroll = NSScrollView()
     private let grid = MatrixPane(.grid)
     private let rowHeader = MatrixPane(.rows)
@@ -80,6 +81,9 @@ final class FrozenMatrixView: NSView {
         guard enabled, rows.indices.contains(row), columns.indices.contains(column) else { return false }
         return (!unavailableRows.contains(row) && !unavailableColumns.contains(column)) || selected.contains(row*columns.count+column)
     }
+    func sourceColumn(forRow row: Int) -> Int? {
+        columns.indices.first { selected.contains(row*columns.count+$0) }
+    }
     func setHover(at point: NSPoint?) {
         var row: Int?, column: Int?
         if let point, point.x>=0,point.y>=0 {
@@ -103,7 +107,7 @@ final class FrozenMatrixView: NSView {
     }
     override func layout() {
         super.layout()
-        scroll.frame=NSRect(x:rowWidth,y:headerHeight,width:max(0,bounds.width-rowWidth),height:max(0,bounds.height-headerHeight))
+        scroll.frame=NSRect(x:frozenWidth,y:headerHeight,width:max(0,bounds.width-frozenWidth),height:max(0,bounds.height-headerHeight))
         scroll.tile()
         grid.setFrameSize(NSSize(width:max(scroll.contentSize.width,CGFloat(columns.count)*cell),
                                  height:max(scroll.contentSize.height,CGFloat(rows.count)*cell)))
@@ -112,9 +116,9 @@ final class FrozenMatrixView: NSView {
                            y:max(0,min(viewport.minY,grid.frame.height-viewport.height)))
         scroll.contentView.scroll(to:origin)
         scroll.reflectScrolledClipView(scroll.contentView)
-        rowHeader.frame=NSRect(x:0,y:headerHeight,width:rowWidth,height:scroll.contentSize.height)
-        columnHeader.frame=NSRect(x:rowWidth,y:0,width:scroll.contentSize.width,height:headerHeight)
-        corner.frame=NSRect(x:0,y:0,width:rowWidth,height:headerHeight)
+        rowHeader.frame=NSRect(x:0,y:headerHeight,width:frozenWidth,height:scroll.contentSize.height)
+        columnHeader.frame=NSRect(x:frozenWidth,y:0,width:scroll.contentSize.width,height:headerHeight)
+        corner.frame=NSRect(x:0,y:0,width:frozenWidth,height:headerHeight)
         rowHeader.needsDisplay=true; columnHeader.needsDisplay=true
     }
     override func draw(_ dirtyRect: NSRect) {
@@ -158,6 +162,7 @@ private final class MatrixPane: NSView {
         guard let m=matrix else { return }
         let point=convert(event.locationInWindow,from:nil)
         if event.clickCount == 2,kind == .rows || kind == .columns,
+           kind != .rows || point.x < m.rowWidth,
            let index=m.headerIndex(row:kind == .rows,at:point) {
             m.onHeaderDoubleClick(kind == .rows,index)
             return
@@ -167,12 +172,12 @@ private final class MatrixPane: NSView {
         let column=Int(point.x/m.cell),row=Int(point.y/m.cell)
         if m.canEdit(row:row,column:column) { m.onClick(row,column) }
     }
-    private func text(_ value: String, in rect: NSRect, alpha: CGFloat = 0.85, unavailable: Bool = false) {
+    private func text(_ value: String, in rect: NSRect, alpha: CGFloat = 0.85, unavailable: Bool = false, topAligned: Bool = false) {
         let paragraph=NSMutableParagraphStyle()
         paragraph.lineBreakMode = .byTruncatingTail
         let parts=value.components(separatedBy:"\n")
         let hasLabel=parts.count>1
-        let originalRect=NSRect(x:rect.minX,y:hasLabel ? rect.minY : rect.midY-6.5,width:rect.width,height:13)
+        let originalRect=NSRect(x:rect.minX,y:hasLabel || topAligned ? rect.minY : rect.midY-6.5,width:rect.width,height:13)
         (parts[0] as NSString).draw(in:originalRect,withAttributes:[.font:NSFont.systemFont(ofSize:10),
             .foregroundColor:NSColor.white.withAlphaComponent(unavailable ? 0.35 : alpha),.paragraphStyle:paragraph])
         if hasLabel {
@@ -226,8 +231,16 @@ private final class MatrixPane: NSView {
                     NSColor.systemCyan.withAlphaComponent(0.18).setFill()
                     NSRect(x:0,y:y,width:bounds.width,height:cell).fill()
                 }
-                text(m.rows[r],in:NSRect(x:12,y:y+2,width:bounds.width-24,height:cell-2),unavailable:m.unavailableRows.contains(r))
+                let source=m.sourceColumn(forRow:r)
+                let topAligned=m.rows[r].contains("\n") || source.map { m.columns[$0].contains("\n") } == true
+                text(m.rows[r],in:NSRect(x:12,y:y+2,width:m.rowWidth-24,height:cell-2),unavailable:m.unavailableRows.contains(r),topAligned:topAligned)
+                if let source {
+                    text("← " + m.columns[source],in:NSRect(x:m.rowWidth+12,y:y+2,width:m.sourceWidth-24,height:cell-2),
+                         alpha:0.7,unavailable:m.unavailableRows.contains(r) || m.unavailableColumns.contains(source),topAligned:topAligned)
+                }
             }
+            NSColor.white.withAlphaComponent(0.1).setFill()
+            NSRect(x:m.rowWidth,y:0,width:1,height:bounds.height).fill()
             NSColor.white.withAlphaComponent(0.25).setFill()
             NSRect(x:bounds.width-1,y:0,width:1,height:bounds.height).fill()
         case .columns:
@@ -250,7 +263,8 @@ private final class MatrixPane: NSView {
             NSColor.white.withAlphaComponent(0.25).setFill()
             NSRect(x:0,y:bounds.height-1,width:bounds.width,height:1).fill()
         case .corner:
-            text("Routing",in:NSRect(x:12,y:bounds.height-24,width:bounds.width-24,height:20),alpha:0.5)
+            text("Routing",in:NSRect(x:12,y:bounds.height-24,width:m.rowWidth-24,height:20),alpha:0.5)
+            text("Source",in:NSRect(x:m.rowWidth+12,y:bounds.height-24,width:m.sourceWidth-24,height:20),alpha:0.5)
         }
     }
 }
