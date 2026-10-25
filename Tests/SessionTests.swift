@@ -261,6 +261,16 @@ import AppKit
         precondition(relaunched.preset.inputs[17] == input)
         let presetCopy=try JSONDecoder().decode(Preset.self,from:Data(relaunched.preset.encoded().utf8))
         precondition(presetCopy.knownDevices?.first?.inputNames == card.inputNames)
+        // Replacing an unavailable source affects only the chosen destination.
+        let replacement=Model(store:SessionStore(url:directory.appendingPathComponent("replacement.json")),discoverDevices:false)
+        replacement.preset=presetCopy
+        let liveCard=Device(id:26,uid:"live-card",name:"Live card",inputs:1,outputs:1,sampleRate:96000,aggregate:false,
+                            inputNames:["Mic"],outputNames:["Monitor"])
+        replacement.updateInventory([liveCard]); replacement.requestToggle(liveCard)
+        let liveInput=Port(deviceUID:liveCard.uid,channel:1)
+        replacement.setInput(0,port:liveInput)
+        precondition(replacement.preset.inputs[0] == liveInput && replacement.preset.inputs[17] == input)
+        precondition(replacement.preset.outputs == presetCopy.outputs)
         relaunched.setInput(1,port:input); relaunched.setOutput(output,channel:3)
         precondition(relaunched.preset.inputs[1] == nil && relaunched.preset.outputs[0].virtualChannel == 2)
         relaunched.setInput(0,port:nil); relaunched.setOutput(output,channel:0)
@@ -298,10 +308,12 @@ import AppKit
         precondition(matrix.hoveredRow == nil)
         matrix.update(rows:["Offline", "Online"],columns:["Offline", "Online"],selected:[0,2],enabled:true,
                       unavailableRows:[0],unavailableColumns:[0],onClick:{_,_ in})
-        precondition(matrix.canEdit(row:0,column:0)) // Existing route can be removed.
+        precondition(!matrix.canEdit(row:0,column:0)) // Existing unavailable route stays locked.
         precondition(!matrix.canEdit(row:0,column:1)) // No new route to missing destination.
-        precondition(matrix.canEdit(row:1,column:0)) // Existing route from missing source can be removed.
-        precondition(matrix.canEdit(row:1,column:1)) // Live ports remain editable.
+        precondition(!matrix.canEdit(row:1,column:0)) // Clicking the unavailable source cannot remove its route.
+        precondition(matrix.canEdit(row:1,column:1)) // A live source can replace it on the same destination row.
+        matrix.update(rows:["Online"],columns:["Online"],selected:[0],enabled:true,onClick:{_,_ in})
+        precondition(matrix.canEdit(row:0,column:0)) // Available routes can still be toggled off.
         matrix.update(rows:["Offline", "Online"],columns:["Offline", "Online"],selected:[],enabled:true,
                       unavailableRows:[0],unavailableColumns:[0],onClick:{_,_ in})
         precondition(!matrix.canEdit(row:0,column:0) && !matrix.canEdit(row:1,column:0))

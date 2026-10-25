@@ -79,7 +79,7 @@ final class FrozenMatrixView: NSView {
     }
     func canEdit(row: Int, column: Int) -> Bool {
         guard enabled, rows.indices.contains(row), columns.indices.contains(column) else { return false }
-        return (!unavailableRows.contains(row) && !unavailableColumns.contains(column)) || selected.contains(row*columns.count+column)
+        return !unavailableRows.contains(row) && !unavailableColumns.contains(column)
     }
     func sourceColumn(forRow row: Int) -> Int? {
         columns.indices.first { selected.contains(row*columns.count+$0) }

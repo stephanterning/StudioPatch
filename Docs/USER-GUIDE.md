@@ -150,7 +150,7 @@ have not been exercised; their underlying file operations have automated tests.
 
 If a selected interface disappears (unplugged, powered off), it stays in the list and matrix, greyed out, with its last known channels and labels.
 
-- You can remove existing routes to and from it, but not add new ones.
+- Greyed-out routes cannot be removed by clicking them in the matrix, and new routes cannot use unavailable ports. To replace an unavailable source, select a source on an available interface in the same **To Computer** row.
 - Audio is muted while a selected interface is missing, and the panel says which one.
 - When the same interface returns, StudioPatch picks it up automatically and audio resumes.
 

@@ -665,7 +665,7 @@ struct ContentView: View {
                 }
             }
 
-            if !m.missingDevices.isEmpty { Text("Unavailable: " + m.missingDevices.map(\.shortName).joined(separator:", ") + ". Saved routes can be removed, but new routes cannot be added.").font(.caption).foregroundStyle(.secondary) }
+            if !m.missingDevices.isEmpty { Text("Unavailable: " + m.missingDevices.map(\.shortName).joined(separator:", ") + ". Greyed-out matrix routes cannot be clicked. Select an available source to replace a To Computer route.").font(.caption).foregroundStyle(.secondary) }
             if !m.saveStatus.isEmpty { Text(m.saveStatus).font(.caption).foregroundStyle(.orange) }
             }.disabled(m.ioBusy)
 
