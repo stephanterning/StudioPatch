@@ -152,6 +152,14 @@ import CoreAudio
             }
         }
     }
+    func matrixGroups(input:Bool) -> [MatrixGroup] {
+        var offset=0
+        return displayDevices.flatMap { device -> [MatrixGroup] in
+            let names=device.channelNames(input:input)
+            defer { offset += names.count }
+            return MatrixGrouping.hardware(uid:device.uid,name:device.shortName,input:input,names:names,offset:offset)
+        }
+    }
     func interfaceLabel(_ port:Port, input:Bool) -> String {
         sourceLabels[ChannelLabelKey(port:port,direction:input ? .input : .output)] ??
             ports(input:input).first(where: { $0.0 == port })?.1 ?? "\(port.deviceUID) · \(input ? "Input" : "Output") \(port.channel)"
@@ -743,7 +751,10 @@ struct ContentView: View {
         }
         let unavailableRows = m.tab == 0 ? Set<Int>() : Set(outs.indices.filter { !m.canConnect(outs[$0].0,input:false) })
         let unavailableColumns = m.tab == 0 ? Set(ins.indices.filter { !m.canConnect(ins[$0].0,input:true) }) : Set<Int>()
-        return Matrix(rows:rows,columns:cols,selected:active,enabled:!m.ioBusy,unavailableRows:unavailableRows,unavailableColumns:unavailableColumns,
+        return Matrix(rows:rows,columns:cols,selected:active,enabled:!m.ioBusy,
+                      rowGroups:m.tab == 0 ? MatrixGrouping.computer(uid:m.preset.deviceUID,input:true,count:m.preset.inputCount) : m.matrixGroups(input:false),
+                      columnGroups:m.tab == 0 ? m.matrixGroups(input:true) : MatrixGrouping.computer(uid:m.preset.deviceUID,input:false,count:m.preset.outputCount),
+                      unavailableRows:unavailableRows,unavailableColumns:unavailableColumns,
                       showsInputLabels:m.tab == 0,
                       rowLabelStatuses:m.tab == 0 ? (0..<m.preset.inputCount).map { m.inputLabelStatus($0) } : outs.map { m.outputLabelStatus($0.0) },
                       onLabelSyncClick:{ row,side in

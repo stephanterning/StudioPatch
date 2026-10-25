@@ -48,6 +48,32 @@ Use the **To Computer / From Computer** switch to pick a direction. Click a cell
 
 Routing changes are applied automatically while audio is running, without interrupting other channels. Changing channel counts, the sample rate, the Sync Source, the I/O buffer or the set of interfaces restarts the audio engine, which causes a short interruption.
 
+### Collapse channel groups
+
+Click a group band above the source columns or beside the destination rows to
+collapse or expand it. Interface groups are inferred from consecutive numbers
+with the same original channel-name prefix, separately for each interface and
+direction. Your custom labels do not affect grouping. AES and names that cannot
+be grouped reliably stay individual. Runs longer than 16 channels have subgroups
+of at most 16: for example, UFX III MADI 1–64 contains banks 1–16, 17–32, 33–48
+and 49–64. To Computer and From Computer use banks of 16 channel numbers.
+
+A filled square involving a collapsed group means at least one connection exists
+inside it; hover for the connection count. Clicking either a filled or empty
+group square only expands its groups, on both axes if necessary. It never changes
+routing. Once both channels are visible individually, ordinary routing clicks
+work as before. Disconnected-interface routes remain grey and unavailable.
+
+Collapsed destination rows show their connection count and an orange count of
+label mismatches, when present. Expand the group before copying individual
+labels. Individual destination rows still show their exact source name even if
+that source's column group is collapsed.
+
+Collapse preferences are remembered separately from routing and do not mark the
+preset modified. Hardware preferences follow the interface across presets;
+computer-channel preferences belong to the preset's virtual device. Groups use
+the available (or last-known, for an unavailable interface) channel inventory.
+
 ### Inactive routes
 
 Channel counts and routing are stored separately. If you reduce a channel count, routes to the hidden channels become **inactive**: they are kept but carry no audio. A notice shows how many inactive routes exist. Increasing the count again reactivates them.

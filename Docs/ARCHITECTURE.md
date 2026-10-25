@@ -129,7 +129,7 @@ Physical input and output labels are a separate, panel-owned registry in `source
 | Path | What it contains |
 |---|---|
 | `Sources/App.swift` | SwiftUI control panel and its `Model`: autosave, presets, labels, device order, interface selection. |
-| `Sources/Matrix.swift` | AppKit routing matrix with frozen row/column headers and hover highlighting. |
+| `Sources/Matrix.swift`, `Sources/MatrixGroups.swift` | AppKit matrix, inferred channel banks and collapsed-axis projection. Routing and label actions retain original channel indices; grouped cells only expand. Aggregate counts are derived from existing routes. Fold preferences use UserDefaults independently of audio configuration, keyed by interface UID/direction or virtual preset UID. |
 | `Sources/Preset.swift` | The configuration model, validation, engine payload and retry schedule. Shared by app, service and tests. |
 | `Sources/SessionStore.swift` | Atomic session file, preset library and physical interface label storage. |
 | `Sources/RuntimeController.swift` | The service's state machine, independent of SwiftUI. |

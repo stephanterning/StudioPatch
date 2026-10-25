@@ -46,6 +46,7 @@ SwiftUI macro expansion and Keychain access do not work inside some sandboxes (i
 | `rate-tests` | `Tests/RateTests.cpp` | Sample-rate synchronization policy with simulated driver calls. |
 | `preset-tests` | `Tests/PresetTests.swift` | The configuration model: inactive routes, validation, older file formats, engine payload. |
 | `session-tests` | `Tests/SessionTests.swift` | The real app `Model` with an isolated session file: autosave, restore, labels, unplugged interfaces, removal confirmation, the asynchronous Core Audio worker. |
+| `matrix-group-tests` | `Tests/MatrixGroupTests.swift` | Inferred banks, nested 16-channel groups, stable IDs, both-axis expansion without routing edits, projected route/label hit mapping, fan-out counts, unavailable routes and isolated fold-preference persistence. |
 | `capture-stream-tests` | `Tests/CaptureStreamTests.cpp` | The streaming writer used by the latency capture tool. |
 | `async-resource-tests` | `Tests/AsyncResourceTests.cpp` | Asynchronous broker acquisition, retry and cancellation. |
 | `ableton-native-tests` | `Tests/AbletonNativeTests.py`, `Tests/AbletonNativeHarness.swift` | Native preferences adapter parity with the Python adapter, backups, preservation of unrelated settings, invalid layouts, missing files/devices, Live-start and concurrent-save guards. Requires Python 3 for tests only. |

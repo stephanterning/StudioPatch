@@ -55,6 +55,7 @@ add_custom_command(OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/session-tests"
         "${CMAKE_CURRENT_SOURCE_DIR}/Sources/Preset.swift"
         "${CMAKE_CURRENT_SOURCE_DIR}/Sources/SessionStore.swift"
         "${CMAKE_CURRENT_SOURCE_DIR}/Sources/Matrix.swift"
+        "${CMAKE_CURRENT_SOURCE_DIR}/Sources/MatrixGroups.swift"
         "${CMAKE_CURRENT_SOURCE_DIR}/Sources/RuntimeConnection.swift"
         "${CMAKE_CURRENT_SOURCE_DIR}/Sources/RuntimeTypes.swift"
         "${CMAKE_CURRENT_SOURCE_DIR}/Sources/RuntimeController.swift"
@@ -65,7 +66,7 @@ add_custom_command(OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/session-tests"
         "$<TARGET_FILE:patchbridge>"
         -framework UserNotifications -framework SwiftUI -framework AppKit -framework Foundation -framework CoreAudio -lc++
         -o "${CMAKE_CURRENT_BINARY_DIR}/session-tests"
-    DEPENDS Sources/Preset.swift Sources/SessionStore.swift Sources/Matrix.swift Sources/RuntimeConnection.swift Sources/RuntimeTypes.swift Sources/RuntimeController.swift Sources/App.swift Sources/AbletonLabels.swift Sources/AbletonToolsView.swift Sources/Bridge.h Tests/SessionTests.swift patchbridge VERBATIM)
+    DEPENDS Sources/Preset.swift Sources/SessionStore.swift Sources/Matrix.swift Sources/MatrixGroups.swift Sources/RuntimeConnection.swift Sources/RuntimeTypes.swift Sources/RuntimeController.swift Sources/App.swift Sources/AbletonLabels.swift Sources/AbletonToolsView.swift Sources/Bridge.h Tests/SessionTests.swift patchbridge VERBATIM)
 add_custom_target(session-tests-build ALL DEPENDS "${CMAKE_CURRENT_BINARY_DIR}/session-tests")
 add_test(NAME session-tests COMMAND "${CMAKE_CURRENT_BINARY_DIR}/session-tests")
 
@@ -95,3 +96,14 @@ if(Python3_Interpreter_FOUND)
     add_test(NAME ableton-native-tests COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/Tests/AbletonNativeTests.py" "${CMAKE_CURRENT_BINARY_DIR}/ableton-native-tests")
     add_test(NAME ableton-script-tests COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/Tests/AbletonNamesTests.py")
 endif()
+
+add_custom_command(OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/matrix-group-tests"
+    COMMAND "${XCRUN_EXECUTABLE}" swiftc -parse-as-library -swift-version 5
+        -module-cache-path "${CMAKE_CURRENT_BINARY_DIR}/swift-cache"
+        "${CMAKE_CURRENT_SOURCE_DIR}/Sources/MatrixGroups.swift"
+        "${CMAKE_CURRENT_SOURCE_DIR}/Sources/Matrix.swift"
+        "${CMAKE_CURRENT_SOURCE_DIR}/Tests/MatrixGroupTests.swift"
+        -framework SwiftUI -framework AppKit -o "${CMAKE_CURRENT_BINARY_DIR}/matrix-group-tests"
+    DEPENDS Sources/MatrixGroups.swift Sources/Matrix.swift Tests/MatrixGroupTests.swift VERBATIM)
+add_custom_target(matrix-group-tests-build ALL DEPENDS "${CMAKE_CURRENT_BINARY_DIR}/matrix-group-tests")
+add_test(NAME matrix-group-tests COMMAND "${CMAKE_CURRENT_BINARY_DIR}/matrix-group-tests")

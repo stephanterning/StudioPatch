@@ -20,7 +20,7 @@ mkdir -p "$task_stage/StudioPatch.app/Contents/MacOS" "$task_stage/StudioPatch.d
 xcrun swiftc -parse-as-library -swift-version 5 -O -target "$(uname -m)-apple-macos14.0" \
     -module-cache-path "$task_build/swift-cache" \
     -import-objc-header "$task_root/Sources/Bridge.h" \
-    "$task_root/Sources/RuntimeTypes.swift" "$task_root/Sources/RuntimeController.swift" "$task_root/Sources/RuntimeConnection.swift" "$task_root/Sources/SessionStore.swift" "$task_root/Sources/Preset.swift" "$task_root/Sources/Matrix.swift" "$task_root/Sources/AbletonLabels.swift" "$task_root/Sources/AbletonToolsView.swift" "$task_root/Sources/App.swift" "$task_build/libpatchbridge.a" \
+    "$task_root/Sources/RuntimeTypes.swift" "$task_root/Sources/RuntimeController.swift" "$task_root/Sources/RuntimeConnection.swift" "$task_root/Sources/SessionStore.swift" "$task_root/Sources/Preset.swift" "$task_root/Sources/Matrix.swift" "$task_root/Sources/MatrixGroups.swift" "$task_root/Sources/AbletonLabels.swift" "$task_root/Sources/AbletonToolsView.swift" "$task_root/Sources/App.swift" "$task_build/libpatchbridge.a" \
     -framework UserNotifications -framework SwiftUI -framework AppKit -framework Foundation -framework CoreAudio -lc++ \
     -o "$task_stage/StudioPatch.app/Contents/MacOS/StudioPatch"
 xcrun swiftc -parse-as-library -swift-version 5 -O -D STUDIOPATCH_MODEL_TESTS \
