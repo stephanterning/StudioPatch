@@ -26,7 +26,8 @@ import AppKit
         reopened.devices = [Device(id:123,uid:"ufx",name:"Fireface UFX III",inputs:9,outputs:9,sampleRate:96000,aggregate:false,
             inputNames:(1...9).map { "Analog \($0)" },outputNames:(1...9).map { "Analog \($0)" })]
         reopened.openLabels(port:labelledPort,direction:1)
-        precondition(!reopened.showingLabels) // Physical names are read-only.
+        precondition(reopened.showingLabels && reopened.labelDirection == 3)
+        precondition(reopened.labelEntries.allSatisfy { $0.direction == .output && $0.port.deviceUID == "ufx" })
         // Named slots are durable snapshots, independent of the working session.
         let slotsURL=directory.appendingPathComponent("library-test/session.json")
         let slotsModel=Model(store:SessionStore(url:slotsURL),discoverDevices:false)
@@ -169,6 +170,237 @@ import AppKit
         for _ in 0..<100 where computer.ioBusy { try await Task.sleep(nanoseconds:10_000_000) }
         precondition(writes.last?.text=="" && writes.last?.port==target)
         precondition(computer.preset.comparisonData()==beforeLabelEdit && !computer.presetIsModified)
+        // Interface aliases persist independently of presets and never change audio configuration.
+        let sourcesURL=directory.appendingPathComponent("sources/session.json")
+        let sources=Model(store:SessionStore(url:sourcesURL),discoverDevices:false)
+        sources.updateInventory(reopened.devices)
+        sources.preset.devices=[Member(uid:"ufx",drift:false)]
+        sources.preset.inputCount=2; sources.preset.outputCount=1; sources.resize()
+        sources.preset.inputs[0]=labelledPort; sources.preset.inputs[1]=labelledPort
+        sources.rememberDevices()
+        let sourceSlot=try sources.saveSlot(name:"Source A")
+        let sourceSession=try Data(contentsOf:sourcesURL), sourceConfig=try sources.preset.encoded(forEngine:true)
+        let sourceNames=try sources.channelNamesPayload()
+        sources.labelWriter={ _ in preconditionFailure("Editing a source alias must not write to Core Audio") }
+        sources.openLabels(port:labelledPort,direction:0)
+        precondition(sources.showingLabels && sources.labelDirection == 2)
+        let staleInputEntry=sources.labelEntries.first { $0.port == labelledPort }!
+        sources.editLabel(ChannelLabel(port:labelledPort,direction:.input,text:"Sång 🎤"))
+        // The field's binding may still hold this pre-save row when its draft is removed.
+        precondition(staleInputEntry.name != "Sång 🎤" && sources.currentLabelName(staleInputEntry) == "Sång 🎤")
+        precondition(sources.inputSourceLabel(labelledPort)=="Sång 🎤" && !sources.presetIsModified)
+        precondition((try? Data(contentsOf:sourcesURL)) == sourceSession)
+        precondition(tryEngineEquals(sources.preset,sourceConfig) && (try? sources.channelNamesPayload()) == sourceNames)
+        _ = try sources.saveSlot(name:"Source B")
+        precondition(sources.inputSourceLabel(labelledPort)=="Sång 🎤")
+        try sources.loadSlot(sourceSlot)
+        precondition(sources.inputSourceLabel(labelledPort)=="Sång 🎤" && !sources.presetIsModified)
+        let sourceReopened=Model(store:SessionStore(url:sourcesURL),discoverDevices:false)
+        precondition(sourceReopened.inputSourceLabel(labelledPort)=="Sång 🎤")
+        precondition(sourceReopened.inputSourceLabel(Port(deviceUID:"ufx",channel:7))=="UFX III · Analog 7")
+        sources.updateInventory([])
+        precondition(sources.inputSourceLabel(labelledPort)=="Sång 🎤" && sources.inputLabelStatus(0) == .unavailable)
+        sources.updateInventory(reopened.devices)
+        let sourceUID=sources.preset.deviceUID
+        func sourceDevice(_ names:[String]) -> Device {
+            Device(id:55,uid:sourceUID,name:"StudioPatch",inputs:2,outputs:1,sampleRate:96000,aggregate:false,inputNames:names,outputNames:["Out"])
+        }
+        sources.updateInventory(reopened.devices + [sourceDevice(["Sång 🎤","Old"])])
+        precondition(sources.inputLabelStatus(0) == .matched && sources.inputLabelStatus(1) == .mismatch)
+        var sourceWrites:[ChannelLabel]=[]
+        var sourceReadback=["Sång 🎤","Old"]
+        sources.labelWriter={ label in
+            sourceWrites.append(label)
+            // A successful setter alone must not make the label green.
+            precondition(sources.inputLabelStatus(1) == .updating)
+        }
+        sources.labelReader={ uid in
+            try await Task.sleep(nanoseconds:10_000_000)
+            return CoreAudioLabels(uid:uid,inputs:sourceReadback,outputs:["Out"],defaultInputs:["Auto 1","Auto 2"],defaultOutputs:["Out"])
+        }
+        sources.updateInputLabel(1)
+        sources.updateInputLabel(1) // Repeated clicks cannot queue a second write.
+        precondition(sources.inputLabelStatus(1) == .updating)
+        for _ in 0..<100 where sources.ioBusy { try await Task.sleep(nanoseconds:10_000_000) }
+        precondition(sourceWrites.count == 1 && sources.inputLabelStatus(1) == .mismatch && !sources.error.isEmpty)
+        precondition(sourceWrites[0].port == Port(deviceUID:sourceUID,channel:2) && sourceWrites[0].text == "Sång 🎤")
+        sourceReadback=["Sång 🎤","Sång 🎤"]
+        sources.updateInputLabel(1)
+        for _ in 0..<100 where sources.ioBusy { try await Task.sleep(nanoseconds:10_000_000) }
+        precondition(sources.inputLabelStatus(0) == .matched && sources.inputLabelStatus(1) == .matched)
+        precondition(!sources.presetIsModified && tryEngineEquals(sources.preset,sourceConfig))
+        // External changes and clearing a source alias both recompute the comparison.
+        sources.updateInventory(reopened.devices + [sourceDevice(["Sång 🎤","External"])])
+        precondition(sources.inputLabelStatus(1) == .mismatch)
+        sources.editLabel(ChannelLabel(port:labelledPort,direction:.input,text:""))
+        precondition(sources.inputSourceLabel(labelledPort)=="UFX III · Analog 9" && sourceWrites.count == 2)
+        precondition(sources.inputLabelStatus(0) == .mismatch)
+        sourceReadback=["Sång 🎤","UFX III · Analog 9"]
+        sources.updateInputLabel(1)
+        for _ in 0..<100 where sources.ioBusy { try await Task.sleep(nanoseconds:10_000_000) }
+        precondition(sourceWrites.last?.text == "UFX III · Analog 9" && sources.inputLabelStatus(1) == .matched)
+        // Failed setters and readbacks cannot manufacture a matching label.
+        sources.labelWriter={ _ in throw NSError(domain:"test",code:3) }
+        sources.updateInputLabel(0)
+        for _ in 0..<100 where sources.ioBusy { try await Task.sleep(nanoseconds:10_000_000) }
+        precondition(sources.inputLabelStatus(0) == .mismatch && sources.updatingLabel == nil)
+        sources.labelWriter={ sourceWrites.append($0) }
+        sources.labelReader={ _ in throw NSError(domain:"test",code:4) }
+        sources.updateInputLabel(0)
+        for _ in 0..<100 where sources.ioBusy { try await Task.sleep(nanoseconds:10_000_000) }
+        precondition(sources.inputLabelStatus(0) == .mismatch)
+        let writesBeforeRouteChange=sourceWrites.count
+        sources.updateInputLabel(0)
+        sources.preset.inputs[0]=Port(deviceUID:"ufx",channel:7)
+        for _ in 0..<100 where sources.ioBusy { try await Task.sleep(nanoseconds:10_000_000) }
+        precondition(sourceWrites.count == writesBeforeRouteChange) // Captured source checked before asynchronous write.
+        sources.preset.inputs[0]=labelledPort
+        sources.labelReader={ _ in
+            sources.preset.virtualDeviceUID="se.studiopatch.preset.changed"
+            return CoreAudioLabels(uid:sourceUID,inputs:["Wrong","Wrong"],outputs:["Out"],defaultInputs:[],defaultOutputs:[])
+        }
+        sources.updateInputLabel(0)
+        for _ in 0..<100 where sources.ioBusy { try await Task.sleep(nanoseconds:10_000_000) }
+        precondition(sources.devices.first(where: { $0.uid == sourceUID })?.inputNames[0] == "Sång 🎤")
+        precondition(sources.inputLabelStatus(0) == .unavailable)
+        // Corrupt source storage is preserved and a failed save leaves the displayed alias intact.
+        let sourceFile=sourcesURL.deletingLastPathComponent().appendingPathComponent("source-labels.json")
+        let corruptLabels=Data("broken labels".utf8)
+        try corruptLabels.write(to:sourceFile)
+        var savedSource=true
+        sources.editLabel(ChannelLabel(port:labelledPort,direction:.input,text:"Not saved")) { savedSource=$0 }
+        precondition(!savedSource && sources.sourceLabels[ChannelLabelKey(port:labelledPort,direction:.input)] == nil)
+        precondition((try? Data(contentsOf:sourceFile)) == corruptLabels)
+        let corruptSourceModel=Model(store:SessionStore(url:sourcesURL),discoverDevices:false)
+        precondition(corruptSourceModel.error.contains("Could not load interface labels"))
+        // Physical outputs use a separate direction key, including the same UID/channel as an input.
+        let outputsURL=directory.appendingPathComponent("outputs/session.json")
+        let outputs=Model(store:SessionStore(url:outputsURL),discoverDevices:false)
+        outputs.updateInventory(reopened.devices)
+        outputs.preset.devices=[Member(uid:"ufx",drift:false)]
+        outputs.preset.inputCount=1; outputs.preset.outputCount=2; outputs.resize()
+        let monitor=Port(deviceUID:"ufx",channel:9), cue=Port(deviceUID:"ufx",channel:8), other=Port(deviceUID:"ufx",channel:7)
+        outputs.preset.inputs[0]=monitor
+        outputs.setOutput(monitor,channel:1); outputs.setOutput(cue,channel:1); outputs.setOutput(other,channel:2)
+        outputs.rememberDevices()
+        let outputSlot=try outputs.saveSlot(name:"Output A")
+        let outputConfig=try outputs.preset.encoded(forEngine:true), outputNames=try outputs.channelNamesPayload()
+        let outputSession=try Data(contentsOf:outputsURL)
+        outputs.labelWriter={ _ in preconditionFailure("Interface labels must not write to Core Audio") }
+        outputs.editLabel(ChannelLabel(port:monitor,direction:.input,text:"Microphone"))
+        outputs.labelDirection=3
+        let staleOutputEntry=outputs.labelEntries.first { $0.port == monitor }!
+        outputs.editLabel(ChannelLabel(port:monitor,direction:.output,text:"Monitor L"))
+        precondition(staleOutputEntry.name != "Monitor L" && outputs.currentLabelName(staleOutputEntry) == "Monitor L")
+        outputs.editLabel(ChannelLabel(port:cue,direction:.output,text:"Cue L"))
+        precondition(outputs.inputSourceLabel(monitor) == "Microphone" && outputs.outputDestinationLabel(monitor) == "Monitor L")
+        precondition((try? Data(contentsOf:outputsURL)) == outputSession && !outputs.presetIsModified)
+        precondition(tryEngineEquals(outputs.preset,outputConfig) && (try? outputs.channelNamesPayload()) == outputNames)
+        _ = try outputs.saveSlot(name:"Output B")
+        precondition(outputs.outputDestinationLabel(monitor) == "Monitor L")
+        try outputs.loadSlot(outputSlot)
+        let outputsReopened=Model(store:SessionStore(url:outputsURL),discoverDevices:false)
+        precondition(outputsReopened.outputDestinationLabel(monitor) == "Monitor L")
+        precondition(outputsReopened.inputSourceLabel(monitor) == "Microphone")
+        precondition(outputsReopened.outputDestinationLabel(other) == "UFX III · Analog 7")
+        outputs.updateInventory([])
+        precondition(outputs.outputDestinationLabel(monitor) == "Monitor L" && outputs.outputLabelStatus(monitor) == .unavailable)
+        let outputUID=outputs.preset.deviceUID
+        let outputDevice=Device(id:56,uid:outputUID,name:"StudioPatch",inputs:1,outputs:2,sampleRate:96000,aggregate:false,
+                                inputNames:["Microphone"],outputNames:["Old monitor","UFX III · Analog 7"])
+        outputs.updateInventory(reopened.devices + [outputDevice])
+        precondition(outputs.outputLabelStatus(monitor) == .mismatch && outputs.outputLabelStatus(cue) == .mismatch)
+        precondition(outputs.outputLabelStatus(other) == .matched)
+        var outputWrites:[ChannelLabel]=[], readbackOutputs=outputDevice.outputNames
+        outputs.labelWriter={ label in
+            outputWrites.append(label)
+            precondition(label.direction == .output && label.port == Port(deviceUID:outputUID,channel:1))
+            precondition(outputs.outputLabelStatus(monitor) == .updating && outputs.outputLabelStatus(cue) == .updating)
+            readbackOutputs[label.port.channel-1]=label.text
+        }
+        outputs.labelReader={ uid in CoreAudioLabels(uid:uid,inputs:["Microphone"],outputs:readbackOutputs,
+                                                   defaultInputs:["Input"],defaultOutputs:["Output 1","Output 2"]) }
+        outputs.updateOutputLabel(monitor); outputs.updateOutputLabel(cue)
+        for _ in 0..<100 where outputs.ioBusy { try await Task.sleep(nanoseconds:10_000_000) }
+        precondition(outputWrites.count == 1 && outputWrites[0].text == "Monitor L")
+        precondition(outputs.outputLabelStatus(monitor) == .matched && outputs.outputLabelStatus(cue) == .mismatch)
+        precondition(outputs.outputLabelStatus(other) == .matched && outputs.inputLabelStatus(0) == .matched)
+        outputs.updateOutputLabel(cue)
+        for _ in 0..<100 where outputs.ioBusy { try await Task.sleep(nanoseconds:10_000_000) }
+        precondition(outputWrites.count == 2 && outputWrites[1].text == "Cue L")
+        precondition(outputs.outputLabelStatus(monitor) == .mismatch && outputs.outputLabelStatus(cue) == .matched)
+        precondition(!outputs.presetIsModified && tryEngineEquals(outputs.preset,outputConfig))
+        outputs.editLabel(ChannelLabel(port:monitor,direction:.output,text:""))
+        precondition(outputs.outputDestinationLabel(monitor) == "UFX III · Analog 9" && outputs.inputSourceLabel(monitor) == "Microphone")
+        outputs.editLabel(ChannelLabel(port:monitor,direction:.output,text:"UFX III · Analog 9"))
+        precondition(outputs.sourceLabels[ChannelLabelKey(port:monitor,direction:.output)] == nil)
+        let renamedHardware=Device(id:321,uid:"ufx",name:"Fireface UFX III",inputs:9,outputs:9,sampleRate:96000,aggregate:false,
+                                   inputNames:reopened.devices[0].inputNames,outputNames:(1...9).map { "Output \($0)" })
+        outputs.updateInventory([renamedHardware,outputDevice])
+        precondition(outputs.outputDestinationLabel(monitor) == "UFX III · Output 9" && outputs.inputSourceLabel(monitor) == "Microphone")
+        outputs.updateInventory(reopened.devices + [outputDevice])
+        precondition(outputWrites.count == 2)
+        outputs.updateOutputLabel(monitor)
+        for _ in 0..<100 where outputs.ioBusy { try await Task.sleep(nanoseconds:10_000_000) }
+        precondition(outputWrites.last?.text == "UFX III · Analog 9" && outputs.outputLabelStatus(monitor) == .matched)
+        // A moved/disconnected/dormant output must not write to the captured old From Computer channel.
+        let outputWritesBefore=outputWrites.count
+        outputs.updateOutputLabel(cue)
+        outputs.setOutput(cue,channel:2)
+        for _ in 0..<100 where outputs.ioBusy { try await Task.sleep(nanoseconds:10_000_000) }
+        precondition(outputWrites.count == outputWritesBefore)
+        outputs.preset.outputCount=1
+        precondition(outputs.outputLabelStatus(cue) == .unavailable)
+        outputs.updateOutputLabel(cue)
+        precondition(!outputs.ioBusy && outputWrites.count == outputWritesBefore)
+        outputs.setOutput(monitor,channel:0)
+        precondition(outputs.outputLabelStatus(monitor) == .unavailable && outputs.outputSourceChannel(monitor) == nil)
+        let outputRegistry=Model(store:SessionStore(url:outputsURL),discoverDevices:false)
+        precondition(outputRegistry.inputSourceLabel(monitor) == "Microphone" && outputRegistry.outputDestinationLabel(cue) == "Cue L")
+        // Copying the Core Audio side changes only the selected physical alias.
+        let bidirectionalURL=directory.appendingPathComponent("bidirectional/session.json")
+        let bidirectional=Model(store:SessionStore(url:bidirectionalURL),discoverDevices:false)
+        bidirectional.updateInventory(reopened.devices)
+        bidirectional.preset.devices=[Member(uid:"ufx",drift:false)]
+        bidirectional.preset.inputCount=2; bidirectional.preset.outputCount=2; bidirectional.resize()
+        bidirectional.preset.inputs[0]=monitor; bidirectional.preset.inputs[1]=monitor
+        bidirectional.setOutput(monitor,channel:1); bidirectional.setOutput(cue,channel:1)
+        let bidirectionalDevice=Device(id:57,uid:bidirectional.preset.deviceUID,name:"StudioPatch",inputs:2,outputs:2,
+                                      sampleRate:96000,aggregate:false,inputNames:["Capture A","Capture B"],outputNames:["Playback A","Playback B"])
+        bidirectional.updateInventory(reopened.devices + [bidirectionalDevice])
+        bidirectional.labelWriter={ _ in preconditionFailure("Reverse copy must not write Core Audio") }
+        let bidirectionalConfig=try bidirectional.preset.encoded(forEngine:true)
+        bidirectional.updateInputLabel(0,from:.destination)
+        precondition(bidirectional.inputSourceLabel(monitor) == "Capture A")
+        precondition(bidirectional.inputLabelStatus(0) == .matched && bidirectional.inputLabelStatus(1) == .mismatch)
+        bidirectional.updateInputLabel(1,from:.destination)
+        precondition(bidirectional.inputSourceLabel(monitor) == "Capture B")
+        precondition(bidirectional.inputLabelStatus(0) == .mismatch && bidirectional.inputLabelStatus(1) == .matched)
+        bidirectional.updateOutputLabel(monitor,from:.source)
+        precondition(bidirectional.outputDestinationLabel(monitor) == "Playback A")
+        precondition(bidirectional.outputLabelStatus(monitor) == .matched && bidirectional.outputLabelStatus(cue) == .mismatch)
+        precondition(bidirectional.outputDestinationLabel(cue) == "UFX III · Analog 8")
+        precondition(bidirectional.inputSourceLabel(monitor) == "Capture B")
+        let bidirectionalReopened=Model(store:SessionStore(url:bidirectionalURL),discoverDevices:false)
+        precondition(bidirectionalReopened.inputSourceLabel(monitor) == "Capture B" && bidirectionalReopened.outputDestinationLabel(monitor) == "Playback A")
+        precondition(bidirectional.virtualDevice == bidirectionalDevice && tryEngineEquals(bidirectional.preset,bidirectionalConfig))
+        bidirectional.ioBusy=true
+        bidirectional.updateInputLabel(0,from:.destination)
+        bidirectional.updateOutputLabel(cue,from:.source)
+        precondition(bidirectional.inputSourceLabel(monitor) == "Capture B" && bidirectional.outputLabelStatus(cue) == .mismatch)
+        bidirectional.ioBusy=false
+        bidirectional.setOutput(cue,channel:0)
+        bidirectional.updateOutputLabel(cue,from:.source)
+        precondition(bidirectional.outputDestinationLabel(cue) == "UFX III · Analog 8")
+        bidirectional.updateInventory([])
+        bidirectional.updateInputLabel(0,from:.destination)
+        precondition(bidirectional.inputSourceLabel(monitor) == "Capture B")
+        bidirectional.updateInventory(reopened.devices + [bidirectionalDevice])
+        let bidirectionalRegistry=bidirectionalURL.deletingLastPathComponent().appendingPathComponent("source-labels.json")
+        try Data("broken".utf8).write(to:bidirectionalRegistry)
+        bidirectional.updateInputLabel(0,from:.destination)
+        precondition(!bidirectional.error.isEmpty && bidirectional.inputSourceLabel(monitor) == "Capture B")
+        precondition((try? Data(contentsOf:bidirectionalRegistry)) == Data("broken".utf8))
         reopened.preset.inputCount = 37; reopened.preset.outputCount = 21
         precondition(reopened.preset.activeInputs[36] == Port(deviceUID:"ufx",channel:9))
         precondition(reopened.preset.activeOutputs[0].virtualChannel == 21)
@@ -300,6 +532,36 @@ import AppKit
         matrix.update(rows:["Offline", "Online"],columns:["Offline", "Online"],selected:[],enabled:true,
                       unavailableRows:[0],unavailableColumns:[0],onClick:{_,_ in})
         precondition(!matrix.canEdit(row:0,column:0) && !matrix.canEdit(row:1,column:0))
+        // Both orange second lines are clickable, including after vertical scrolling.
+        matrix.update(rows:(0..<100).map { "To Computer \($0+1)\nCapture" },columns:["UFX III · Analog 9\nSång"],
+                      selected:Set(0..<100),enabled:true,showsInputLabels:true,
+                      rowLabelStatuses:(0..<100).map { $0 == 10 ? .mismatch : .matched },onClick:{_,_ in})
+        matrix.layoutSubtreeIfNeeded()
+        matrix.scroll.contentView.scroll(to:NSPoint(x:0,y:320))
+        precondition(matrix.syncLabelRow(at:NSPoint(x:matrix.rowWidth+14,y:20)) == 10)
+        precondition(matrix.syncLabelRow(at:NSPoint(x:matrix.rowWidth+14,y:5)) == nil)
+        precondition(matrix.syncLabelRow(at:NSPoint(x:matrix.rowWidth+14,y:52)) == nil)
+        precondition(matrix.syncLabelRow(at:NSPoint(x:matrix.frozenWidth-2,y:20)) == nil)
+        precondition(matrix.syncLabelRow(at:NSPoint(x:14,y:20)) == 10)
+        precondition(matrix.syncLabelRow(at:NSPoint(x:14,y:5)) == nil)
+        precondition(matrix.labelColor(row:10,side:.source) == .systemOrange && matrix.labelColor(row:10,side:.destination) == .systemOrange)
+        matrix.enabled=false
+        precondition(matrix.syncLabelRow(at:NSPoint(x:matrix.rowWidth+14,y:20)) == nil)
+        matrix.update(rows:["UFX III · Analog 9\nMonitor L","UFX III · Analog 8\nCue L","Unconnected\nSpare"],
+                      columns:["From Computer 1\nMonitor L"],selected:[0,1],enabled:true,
+                      rowLabelStatuses:[.matched,.mismatch,.unavailable],onClick:{_,_ in})
+        matrix.layoutSubtreeIfNeeded()
+        matrix.scroll.contentView.scroll(to:.zero)
+        precondition(matrix.sourceText(forRow:0) == "From Computer 1\nMonitor L")
+        precondition(matrix.sourceText(forRow:1) == "From Computer 1\nMonitor L")
+        precondition(matrix.sourceText(forRow:2) == nil)
+        precondition(matrix.syncLabelRow(at:NSPoint(x:14,y:52)) == 1)
+        precondition(matrix.syncLabelRow(at:NSPoint(x:14,y:37)) == nil) // The hardware name still opens the editor.
+        precondition(matrix.syncLabelRow(at:NSPoint(x:14,y:20)) == nil) // Matching Destination label is not actionable.
+        precondition(matrix.syncLabelRow(at:NSPoint(x:matrix.rowWidth+14,y:52)) == 1) // Clicking Core Audio copies to this hardware alias.
+        precondition(matrix.syncLabelRow(at:NSPoint(x:matrix.rowWidth+14,y:20)) == nil)
+        precondition(matrix.labelColor(row:1,side:.source) == .systemOrange && matrix.labelColor(row:1,side:.destination) == .systemOrange)
+        precondition(matrix.syncLabelRect(2,side:.destination) == nil) // No pair on an unconnected row.
         // A blocked native inventory must leave MainActor responsive and must
         // not accumulate requests from Refresh or periodic polling.
         let gate=DispatchSemaphore(value:0)

@@ -1,6 +1,30 @@
 import SwiftUI
 import AppKit
 
+enum LabelSide: CaseIterable {
+    case source, destination
+    var copyArrow:String { self == .source ? "← " : " →" }
+}
+
+enum LabelMatchStatus {
+    case matched, mismatch, unavailable, updating
+    var nsColor:NSColor {
+        switch self {
+        case .matched: return .systemGreen
+        case .mismatch: return .systemOrange
+        case .unavailable, .updating: return .gray
+        }
+    }
+    var help:String {
+        switch self {
+        case .matched: return "Labels match"
+        case .mismatch: return "Label mismatch, click to copy this label to the other side"
+        case .unavailable: return "Label comparison unavailable"
+        case .updating: return "Updating label…"
+        }
+    }
+}
+
 struct Matrix: NSViewRepresentable {
     let rows: [String]
     let columns: [String]
@@ -8,12 +32,17 @@ struct Matrix: NSViewRepresentable {
     let enabled: Bool
     var unavailableRows: Set<Int> = []
     var unavailableColumns: Set<Int> = []
+    var showsInputLabels = false
+    var rowLabelStatuses: [LabelMatchStatus] = []
+    var onLabelSyncClick: (Int,LabelSide)->Void = { _,_ in }
     let onHeaderDoubleClick: (Bool,Int)->Void
     let onClick: (Int,Int)->Void
 
     func makeNSView(context: Context) -> FrozenMatrixView { FrozenMatrixView() }
     func updateNSView(_ view: FrozenMatrixView, context: Context) {
-        view.update(rows:rows,columns:columns,selected:selected,enabled:enabled,unavailableRows:unavailableRows,unavailableColumns:unavailableColumns,onHeaderDoubleClick:onHeaderDoubleClick,onClick:onClick)
+        view.update(rows:rows,columns:columns,selected:selected,enabled:enabled,unavailableRows:unavailableRows,unavailableColumns:unavailableColumns,
+                    showsInputLabels:showsInputLabels,rowLabelStatuses:rowLabelStatuses,onLabelSyncClick:onLabelSyncClick,
+                    onHeaderDoubleClick:onHeaderDoubleClick,onClick:onClick)
     }
 }
 
@@ -30,6 +59,9 @@ final class FrozenMatrixView: NSView {
     var selected = Set<Int>()
     var enabled = true
     var unavailableRows = Set<Int>(), unavailableColumns = Set<Int>()
+    var showsInputLabels = false
+    var rowLabelStatuses: [LabelMatchStatus] = []
+    var onLabelSyncClick: (Int,LabelSide)->Void = { _,_ in }
     var onClick: (Int,Int)->Void = {_,_ in}
     var onHeaderDoubleClick: (Bool,Int)->Void = {_,_ in}
     private(set) var hoveredRow: Int?
@@ -52,13 +84,17 @@ final class FrozenMatrixView: NSView {
         addSubview(rowHeader)
         addSubview(columnHeader)
         addSubview(corner)
+        corner.setAccessibilityElement(true)
+        corner.setAccessibilityRole(.staticText)
+        corner.setAccessibilityLabel("Blue: Core Audio Label. Green: Interface Label. Orange: Label Mismatch.")
         grid.setAccessibilityElement(true)
         grid.setAccessibilityRole(.group)
-        grid.setAccessibilityLabel("Routing matrix with frozen channel headers. Use the channel list for accessible editing.")
+        grid.setAccessibilityLabel("Routing matrix with frozen destination and source headers.")
         observer = NotificationCenter.default.addObserver(forName:NSView.boundsDidChangeNotification,
             object:scroll.contentView,queue:.main) { [weak self] _ in
                 self?.rowHeader.needsDisplay = true
                 self?.columnHeader.needsDisplay = true
+                self?.rowHeader.refreshLabelToolTips()
                 self?.refreshHover()
             }
     }
@@ -67,12 +103,16 @@ final class FrozenMatrixView: NSView {
 
     func update(rows: [String], columns: [String], selected: Set<Int>, enabled: Bool,
                 unavailableRows: Set<Int> = [], unavailableColumns: Set<Int> = [],
+                showsInputLabels: Bool = false, rowLabelStatuses: [LabelMatchStatus] = [],
+                onLabelSyncClick: @escaping (Int,LabelSide)->Void = { _,_ in },
                 onHeaderDoubleClick: @escaping (Bool,Int)->Void = {_,_ in},
                 onClick: @escaping (Int,Int)->Void) {
         self.rows=rows; self.columns=columns; self.selected=selected
         self.enabled=enabled; self.onClick=onClick
         self.unavailableRows=unavailableRows; self.unavailableColumns=unavailableColumns
         self.onHeaderDoubleClick=onHeaderDoubleClick
+        self.showsInputLabels=showsInputLabels; self.rowLabelStatuses=rowLabelStatuses
+        self.onLabelSyncClick=onLabelSyncClick
         setHover(at:nil)
         needsLayout=true
         for pane in [grid,rowHeader,columnHeader,corner] { pane.needsDisplay=true }
@@ -83,6 +123,35 @@ final class FrozenMatrixView: NSView {
     }
     func sourceColumn(forRow row: Int) -> Int? {
         columns.indices.first { selected.contains(row*columns.count+$0) }
+    }
+    func sourceText(forRow row:Int) -> String? {
+        guard rows.indices.contains(row), let source=sourceColumn(forRow:row) else { return nil }
+        return columns[source]
+    }
+    func syncLabelRect(_ row:Int, side:LabelSide) -> NSRect? {
+        guard rowLabelStatuses.indices.contains(row), rows.indices.contains(row),
+              let source=sourceText(forRow:row) else { return nil }
+        let labelled=side == .source ? source : rows[row]
+        let parts=labelled.components(separatedBy:"\n")
+        guard parts.count > 1 else { return nil }
+        let label=parts.dropFirst().joined(separator:" ") + (copySide(row:row,side:side)?.copyArrow ?? "")
+        let columnWidth=side == .source ? sourceWidth : rowWidth
+        let width=min(columnWidth-24,(label as NSString).size(withAttributes:[.font:NSFont.systemFont(ofSize:10,weight:.medium)]).width+2)
+        return NSRect(x:(side == .source ? rowWidth : 0)+12,y:CGFloat(row)*cell-scroll.contentView.bounds.minY+16,width:width,height:13)
+    }
+    func syncLabelRow(at point:NSPoint) -> Int? {
+        guard enabled, let row=headerIndex(row:true,at:point), rowLabelStatuses.indices.contains(row),
+              rowLabelStatuses[row] == .mismatch, let rect=syncLabelRect(row,side:point.x < rowWidth ? .destination : .source), rect.contains(point) else { return nil }
+        return row
+    }
+    func copySide(row:Int, side:LabelSide) -> LabelSide? {
+        enabled && rowLabelStatuses.indices.contains(row) && rowLabelStatuses[row] == .mismatch ? side : nil
+    }
+    func labelColor(row:Int, side:LabelSide) -> NSColor {
+        guard rowLabelStatuses.indices.contains(row) else { return .systemCyan }
+        let status=rowLabelStatuses[row]
+        let hardwareSide:LabelSide=showsInputLabels ? .source : .destination
+        return status == .matched && side != hardwareSide ? .systemCyan : status.nsColor
     }
     func setHover(at point: NSPoint?) {
         var row: Int?, column: Int?
@@ -120,6 +189,7 @@ final class FrozenMatrixView: NSView {
         columnHeader.frame=NSRect(x:frozenWidth,y:0,width:scroll.contentSize.width,height:headerHeight)
         corner.frame=NSRect(x:0,y:0,width:frozenWidth,height:headerHeight)
         rowHeader.needsDisplay=true; columnHeader.needsDisplay=true
+        rowHeader.refreshLabelToolTips()
     }
     override func draw(_ dirtyRect: NSRect) {
         NSColor(calibratedRed:0.075,green:0.09,blue:0.11,alpha:1).setFill()
@@ -127,11 +197,12 @@ final class FrozenMatrixView: NSView {
     }
 }
 
-private final class MatrixPane: NSView {
+private final class MatrixPane: NSView, NSViewToolTipOwner {
     enum Kind { case grid, rows, columns, corner }
     let kind: Kind
     weak var matrix: FrozenMatrixView?
     private var mouseTracking: NSTrackingArea?
+    private var labelToolTipRects: [NSRect] = []
     override var isFlipped: Bool { true }
     init(_ kind: Kind) {
         self.kind=kind
@@ -161,6 +232,10 @@ private final class MatrixPane: NSView {
     override func mouseDown(with event: NSEvent) {
         guard let m=matrix else { return }
         let point=convert(event.locationInWindow,from:nil)
+        if kind == .rows, let row=m.syncLabelRow(at:point) {
+            m.onLabelSyncClick(row,point.x < m.rowWidth ? .destination : .source)
+            return
+        }
         if event.clickCount == 2,kind == .rows || kind == .columns,
            kind != .rows || point.x < m.rowWidth,
            let index=m.headerIndex(row:kind == .rows,at:point) {
@@ -172,7 +247,35 @@ private final class MatrixPane: NSView {
         let column=Int(point.x/m.cell),row=Int(point.y/m.cell)
         if m.canEdit(row:row,column:column) { m.onClick(row,column) }
     }
-    private func text(_ value: String, in rect: NSRect, alpha: CGFloat = 0.85, unavailable: Bool = false, topAligned: Bool = false) {
+    func refreshLabelToolTips() {
+        guard kind == .rows, let m=matrix else { return }
+        let rects=m.rowLabelStatuses.indices.flatMap { row in
+            LabelSide.allCases.compactMap { side -> NSRect? in
+                guard let rect=m.syncLabelRect(row,side:side), rect.intersects(bounds) else { return nil }
+                return rect.intersection(bounds)
+            }
+        }
+        // Routine status refreshes must not continually restart the hover delay.
+        if rects != labelToolTipRects {
+            removeAllToolTips()
+            labelToolTipRects=rects
+            for rect in rects { addToolTip(rect,owner:self,userData:nil) }
+        }
+        window?.invalidateCursorRects(for:self)
+    }
+    override func resetCursorRects() {
+        guard kind == .rows, let m=matrix, m.enabled else { return }
+        for row in m.rowLabelStatuses.indices where m.rowLabelStatuses[row] == .mismatch {
+            for side in LabelSide.allCases {
+                if let rect=m.syncLabelRect(row,side:side), rect.intersects(bounds) { addCursorRect(rect.intersection(bounds),cursor:.pointingHand) }
+            }
+        }
+    }
+    func view(_ view:NSView, stringForToolTip tag:NSView.ToolTipTag, point:NSPoint, userData:UnsafeMutableRawPointer?) -> String {
+        guard let m=matrix, let row=m.headerIndex(row:true,at:point), m.rowLabelStatuses.indices.contains(row) else { return "" }
+        return m.rowLabelStatuses[row].help
+    }
+    private func text(_ value: String, in rect: NSRect, alpha: CGFloat = 0.85, unavailable: Bool = false, topAligned: Bool = false, labelColor:NSColor = .systemCyan, copySide:LabelSide? = nil) {
         let paragraph=NSMutableParagraphStyle()
         paragraph.lineBreakMode = .byTruncatingTail
         let parts=value.components(separatedBy:"\n")
@@ -181,10 +284,19 @@ private final class MatrixPane: NSView {
         (parts[0] as NSString).draw(in:originalRect,withAttributes:[.font:NSFont.systemFont(ofSize:10),
             .foregroundColor:NSColor.white.withAlphaComponent(unavailable ? 0.35 : alpha),.paragraphStyle:paragraph])
         if hasLabel {
-            // Draw separately: paragraph truncation must not swallow the custom label.
-            (parts.dropFirst().joined(separator:" ") as NSString).draw(in:NSRect(x:rect.minX,y:rect.minY+14,width:rect.width,height:13),
-                withAttributes:[.font:NSFont.systemFont(ofSize:10,weight:.medium),
-                    .foregroundColor:unavailable ? NSColor.gray : NSColor.systemCyan,.paragraphStyle:paragraph])
+            let label=parts.dropFirst().joined(separator:" ") as NSString
+            let attributes:[NSAttributedString.Key:Any]=[.font:NSFont.systemFont(ofSize:10,weight:.medium),
+                .foregroundColor:unavailable ? NSColor.gray : labelColor,.paragraphStyle:paragraph]
+            let arrow=(copySide?.copyArrow ?? "") as NSString
+            let arrowWidth=arrow.size(withAttributes:attributes).width
+            let labelWidth=min(label.size(withAttributes:attributes).width+2,max(0,rect.width-arrowWidth))
+            // Reserve arrow space so even a truncated destination label retains its direction.
+            let labelX=rect.minX + (copySide == .source ? arrowWidth : 0)
+            label.draw(in:NSRect(x:labelX,y:rect.minY+14,width:labelWidth,height:13),withAttributes:attributes)
+            if let copySide {
+                arrow.draw(in:NSRect(x:copySide == .source ? rect.minX : labelX+labelWidth,
+                                     y:rect.minY+14,width:arrowWidth,height:13),withAttributes:attributes)
+            }
         }
     }
     override func draw(_ dirtyRect: NSRect) {
@@ -233,10 +345,12 @@ private final class MatrixPane: NSView {
                 }
                 let source=m.sourceColumn(forRow:r)
                 let topAligned=m.rows[r].contains("\n") || source.map { m.columns[$0].contains("\n") } == true
-                text(m.rows[r],in:NSRect(x:12,y:y+2,width:m.rowWidth-24,height:cell-2),unavailable:m.unavailableRows.contains(r),topAligned:topAligned)
-                if let source {
-                    text("← " + m.columns[source],in:NSRect(x:m.rowWidth+12,y:y+2,width:m.sourceWidth-24,height:cell-2),
-                         alpha:0.7,unavailable:m.unavailableRows.contains(r) || m.unavailableColumns.contains(source),topAligned:topAligned)
+                text(m.rows[r],in:NSRect(x:12,y:y+2,width:m.rowWidth-24,height:cell-2),unavailable:m.unavailableRows.contains(r),topAligned:topAligned,
+                     labelColor:m.labelColor(row:r,side:.destination),copySide:m.copySide(row:r,side:.destination))
+                if let source, let sourceText=m.sourceText(forRow:r) {
+                    text(sourceText,in:NSRect(x:m.rowWidth+12,y:y+2,width:m.sourceWidth-24,height:cell-2),
+                         alpha:0.7,unavailable:m.unavailableRows.contains(r) || m.unavailableColumns.contains(source),topAligned:topAligned,
+                         labelColor:m.labelColor(row:r,side:.source),copySide:m.copySide(row:r,side:.source))
                 }
             }
             NSColor.white.withAlphaComponent(0.1).setFill()
@@ -257,13 +371,25 @@ private final class MatrixPane: NSView {
                 transform.translateX(by:x+cell/2,yBy:bounds.height-10)
                 transform.rotate(byDegrees:-90)
                 transform.concat()
-                text(m.columns[c],in:NSRect(x:0,y:-cell/2+2,width:bounds.height-18,height:cell-2),alpha:0.8,unavailable:m.unavailableColumns.contains(c))
+                text(m.columns[c],in:NSRect(x:0,y:-cell/2+2,width:bounds.height-18,height:cell-2),alpha:0.8,unavailable:m.unavailableColumns.contains(c),
+                     labelColor:m.showsInputLabels ? .systemGreen : .systemCyan)
                 NSGraphicsContext.restoreGraphicsState()
             }
             NSColor.white.withAlphaComponent(0.25).setFill()
             NSRect(x:0,y:bounds.height-1,width:bounds.width,height:1).fill()
         case .corner:
-            text("Routing",in:NSRect(x:12,y:bounds.height-24,width:m.rowWidth-24,height:20),alpha:0.5)
+            let legend:[(String,NSColor)]=[("Core Audio Label",.systemCyan),("Interface Label",.systemGreen),("Label Mismatch",.systemOrange)]
+            var legendX:CGFloat=12
+            let legendY=bounds.height-54
+            for (name,color) in legend {
+                color.setFill()
+                NSBezierPath(ovalIn:NSRect(x:legendX,y:legendY+4,width:6,height:6)).fill()
+                let attributes:[NSAttributedString.Key:Any]=[.font:NSFont.systemFont(ofSize:10),.foregroundColor:NSColor.white.withAlphaComponent(0.65)]
+                let width=(name as NSString).size(withAttributes:attributes).width
+                (name as NSString).draw(in:NSRect(x:legendX+12,y:legendY,width:width+2,height:14),withAttributes:attributes)
+                legendX += width+30
+            }
+            text("Destination",in:NSRect(x:12,y:bounds.height-24,width:m.rowWidth-24,height:20),alpha:0.5)
             text("Source",in:NSRect(x:m.rowWidth+12,y:bounds.height-24,width:m.sourceWidth-24,height:20),alpha:0.5)
         }
     }

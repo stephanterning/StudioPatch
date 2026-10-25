@@ -6,6 +6,6 @@ source="$root/Tools/ableton-channel-names.swift"
 binary="$cache/ableton-channel-names"
 mkdir -p "$cache"
 if [[ ! -x "$binary" || "$source" -nt "$binary" ]]; then
-    xcrun swiftc -module-cache-path "$cache/module-cache" "$source" -o "$binary"
+    xcrun swiftc -parse-as-library -module-cache-path "$cache/module-cache" "$source" -o "$binary"
 fi
 exec python3 "$root/Tools/sync-ableton-channel-names.py" --helper "$binary" "$@"

@@ -58,12 +58,14 @@ add_custom_command(OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/session-tests"
         "${CMAKE_CURRENT_SOURCE_DIR}/Sources/RuntimeConnection.swift"
         "${CMAKE_CURRENT_SOURCE_DIR}/Sources/RuntimeTypes.swift"
         "${CMAKE_CURRENT_SOURCE_DIR}/Sources/RuntimeController.swift"
+        "${CMAKE_CURRENT_SOURCE_DIR}/Sources/AbletonLabels.swift"
+        "${CMAKE_CURRENT_SOURCE_DIR}/Sources/AbletonToolsView.swift"
         "${CMAKE_CURRENT_SOURCE_DIR}/Sources/App.swift"
         "${CMAKE_CURRENT_SOURCE_DIR}/Tests/SessionTests.swift"
         "$<TARGET_FILE:patchbridge>"
         -framework UserNotifications -framework SwiftUI -framework AppKit -framework Foundation -framework CoreAudio -lc++
         -o "${CMAKE_CURRENT_BINARY_DIR}/session-tests"
-    DEPENDS Sources/Preset.swift Sources/SessionStore.swift Sources/Matrix.swift Sources/RuntimeConnection.swift Sources/RuntimeTypes.swift Sources/RuntimeController.swift Sources/App.swift Sources/Bridge.h Tests/SessionTests.swift patchbridge VERBATIM)
+    DEPENDS Sources/Preset.swift Sources/SessionStore.swift Sources/Matrix.swift Sources/RuntimeConnection.swift Sources/RuntimeTypes.swift Sources/RuntimeController.swift Sources/App.swift Sources/AbletonLabels.swift Sources/AbletonToolsView.swift Sources/Bridge.h Tests/SessionTests.swift patchbridge VERBATIM)
 add_custom_target(session-tests-build ALL DEPENDS "${CMAKE_CURRENT_BINARY_DIR}/session-tests")
 add_test(NAME session-tests COMMAND "${CMAKE_CURRENT_BINARY_DIR}/session-tests")
 
@@ -79,3 +81,17 @@ target_compile_options(async-resource-tests PRIVATE -UNDEBUG)
 add_test(NAME async-resource-tests COMMAND async-resource-tests)
 add_executable(profile-review Tools/profile-review.cpp)
 target_link_libraries(profile-review PRIVATE aspl)
+
+# The app's self-contained Ableton adapter is checked against the existing script.
+find_package(Python3 COMPONENTS Interpreter)
+if(Python3_Interpreter_FOUND)
+    add_custom_command(OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/ableton-native-tests"
+        COMMAND "${XCRUN_EXECUTABLE}" swiftc -parse-as-library -swift-version 5
+            "${CMAKE_CURRENT_SOURCE_DIR}/Sources/AbletonLabels.swift"
+            "${CMAKE_CURRENT_SOURCE_DIR}/Tests/AbletonNativeHarness.swift"
+            -o "${CMAKE_CURRENT_BINARY_DIR}/ableton-native-tests"
+        DEPENDS Sources/AbletonLabels.swift Tests/AbletonNativeHarness.swift VERBATIM)
+    add_custom_target(ableton-native-tests-build ALL DEPENDS "${CMAKE_CURRENT_BINARY_DIR}/ableton-native-tests")
+    add_test(NAME ableton-native-tests COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/Tests/AbletonNativeTests.py" "${CMAKE_CURRENT_BINARY_DIR}/ableton-native-tests")
+    add_test(NAME ableton-script-tests COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/Tests/AbletonNamesTests.py")
+endif()

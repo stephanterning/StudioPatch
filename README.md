@@ -24,7 +24,7 @@ StudioPatch gives your DAW a single device called **StudioPatch** with exactly t
 
 - **One virtual device, your channel layout.** 0–128 inputs and 0–128 outputs, chosen independently, filled from any channel of any connected interface.
 - **Routing matrix** for each direction. One source per destination, unlimited fan-out, and no mixing, gain or other processing.
-- **Your names in the DAW.** Label hardware channels once; the virtual channels are named after what they are connected to (see the screenshot below).
+- **Your names in the DAW.** Label interface inputs and outputs across presets, then copy names in either direction between Source and Destination. Mismatching labels are orange; click the one to keep. Virtual channel labels can also be edited directly.
 - **Low added latency.** The Sync Source interface is read directly through shared memory, without resampling. Measured: +0.67 ms round trip at 96 kHz and +1.33 ms at 48 kHz compared with using the interface directly ([details](Docs/LATENCY.md)).
 - **Honest latency reporting**, so DAW recording compensation keeps working.
 - **Sample rate follows your DAW.** Change the rate in the DAW or the panel; the Sync Source and locked interfaces follow.

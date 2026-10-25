@@ -108,12 +108,15 @@ The service publishes routing-derived defaults through `spnm` and display names 
 
 Manual aliases are not part of preset comparison or new preset serialization. Save-as-new obtains effective/default names before switching and copies only differing strings to the new UID. Pending transfers live in memory and errors report partial completion. Label ownership and the outstanding native HAL lifecycle checks are described in [the design](PRESET-IDENTITY-AND-LABELS.md) and [verification record](LABEL-VERIFICATION.md).
 
+Physical input and output labels are a separate, panel-owned registry in `source-labels.json`, keyed by stable physical UID, direction and channel number. They are shared across presets and never enter the engine payload or routing-derived defaults. Existing input entries remain valid. An absent override resolves to the current interface/channel name. The panel compares this effective label with the actual connected virtual channel name. Both mismatching labels are orange, and clicking either copies its displayed value to the other side. A physical-label click writes the virtual HAL alias; a Core Audio-label click writes the selected physical alias in the local registry. In To Computer the physical side is Source; in From Computer it is Destination. Input rows target To Computer; physical output rows target their connected From Computer channel. From Computer Source cells display the actual virtual Core Audio label. Outputs sharing a virtual source compare independently, and all show pending status while that source's name is being written. The panel checks the captured preset/routing before writing and after readback, and shows a match only from read-back names. Interface-label saves are atomic and reload the registry first; unreadable storage is reported and preserved. Hardware channel names remain read-only.
+
 ## Files on disk
 
 | Location | Written by | Contents |
 |---|---|---|
 | `~/Library/Application Support/StudioPatch/last-session.json` | Panel | Current configuration: channel counts, routes (including inactive ones), interfaces, display order, active preset UID/display name. Manual labels are stored only in Core Audio. |
 | `~/Library/Application Support/StudioPatch/presets.json` | Panel | Named presets. |
+| `~/Library/Application Support/StudioPatch/source-labels.json` | Panel | Physical input and output aliases shared across presets; separate from virtual Core Audio labels. |
 | `~/Library/Application Support/StudioPatch/runtime-status.json` | Service | Live status, device inventory and timing diagnostics. |
 | `~/Library/Application Support/StudioPatch/recovery-attempt.json` | Service | Time of the last automatic self-restart. Do not delete it to force retries. |
 | `~/Library/LaunchAgents/se.studiopatch.runtime.plist` | `install-service.sh` | Starts the service at login. Points to `Dist/` in your clone. |
@@ -128,7 +131,7 @@ Manual aliases are not part of preset comparison or new preset serialization. Sa
 | `Sources/App.swift` | SwiftUI control panel and its `Model`: autosave, presets, labels, device order, interface selection. |
 | `Sources/Matrix.swift` | AppKit routing matrix with frozen row/column headers and hover highlighting. |
 | `Sources/Preset.swift` | The configuration model, validation, engine payload and retry schedule. Shared by app, service and tests. |
-| `Sources/SessionStore.swift` | Atomic session file and preset library storage. |
+| `Sources/SessionStore.swift` | Atomic session file, preset library and physical interface label storage. |
 | `Sources/RuntimeController.swift` | The service's state machine, independent of SwiftUI. |
 | `Sources/RuntimeConnection.swift` | Status file, notifications, and starting the LaunchAgent. |
 | `Sources/RuntimeTypes.swift` | Shared types, the serial Core Audio worker queue, device and directory observers. |
@@ -140,6 +143,7 @@ Manual aliases are not part of preset comparison or new preset serialization. Sa
 | `Sources/Core.hpp`, `Latency.hpp`, `ChannelNames.hpp`, `RateWire.hpp`, `RateSync.hpp` | Shared constants, property selectors and small wire formats. |
 | `Sources/RouteSlot.hpp`, `AsyncResource.hpp`, `Timing.hpp`, `HostStorage.hpp` | Lock-free routing swap, asynchronous broker acquisition, optional timing telemetry, and deadlock-safe host storage. |
 | `Sources/Inspect.cpp` | `patch-inspect`. |
+| `Sources/AbletonToolsView.swift`, `Sources/AbletonLabels.swift`, `Tools/update-ableton-labels.swift` | Tools sheet and bundled `StudioPatchAbletonLabels` helper. Reads current Core Audio names, checks Live is closed, conservatively patches recognized preferences, backs up and atomically replaces the file. Native counterpart of the optional Python CLI; no Python or compiler is required at runtime. |
 | `Tests/` | Test suites; see [CONTRIBUTING.md](../CONTRIBUTING.md#tests). |
 | `Tools/` | Latency measurement and analysis tools; see [LATENCY.md](LATENCY.md#measuring-latency). |
 | `Vendor/libASPL/` | Pinned copy of [libASPL](https://github.com/gavv/libASPL) at `633e0f70203edd87d320fc5a3cae901e1363aac5`, with local changes: asynchronous host notifications, I/O cycle info for timing, and an opt-in separate lock for client start/stop. |

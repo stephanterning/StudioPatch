@@ -78,6 +78,9 @@ struct Snapshot: Encodable {
     let devices: [AudioDevice]
 }
 
+#if !STUDIOPATCH_ABLETON_EMBEDDED
+@main struct ChannelNamesCLI {
+static func main() {
 do {
     let running = NSWorkspace.shared.runningApplications.contains {
         $0.bundleIdentifier?.hasPrefix("com.ableton.live") == true
@@ -97,3 +100,7 @@ do {
         print(String(decoding: data, as: UTF8.self))
     }
 } catch { fputs("Error: \(error)\n", stderr); exit(1) }
+
+}
+}
+#endif

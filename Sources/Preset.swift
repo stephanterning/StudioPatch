@@ -14,7 +14,11 @@ struct Member: Codable {
     var drift: Bool
     var syncLocked: Bool? = nil
 }
-enum PortDirection: String, Codable { case input, output }
+enum PortDirection: String, Codable, Hashable { case input, output }
+struct ChannelLabelKey: Hashable {
+    var port: Port
+    var direction: PortDirection
+}
 struct ChannelLabel: Codable {
     var port: Port
     var direction: PortDirection

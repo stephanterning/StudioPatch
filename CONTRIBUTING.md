@@ -48,6 +48,8 @@ SwiftUI macro expansion and Keychain access do not work inside some sandboxes (i
 | `session-tests` | `Tests/SessionTests.swift` | The real app `Model` with an isolated session file: autosave, restore, labels, unplugged interfaces, removal confirmation, the asynchronous Core Audio worker. |
 | `capture-stream-tests` | `Tests/CaptureStreamTests.cpp` | The streaming writer used by the latency capture tool. |
 | `async-resource-tests` | `Tests/AsyncResourceTests.cpp` | Asynchronous broker acquisition, retry and cancellation. |
+| `ableton-native-tests` | `Tests/AbletonNativeTests.py`, `Tests/AbletonNativeHarness.swift` | Native preferences adapter parity with the Python adapter, backups, preservation of unrelated settings, invalid layouts, missing files/devices, Live-start and concurrent-save guards. Requires Python 3 for tests only. |
+| `ableton-script-tests` | `Tests/AbletonNamesTests.py` | Optional Python CLI preferences adapter, naming rules, activation and restoration behavior. Requires Python 3. |
 | `Scripts/test-runtime.sh` | `Tests/ServiceRecoveryTests.swift`, `Tests/RuntimeIntegration.py`, `Tests/RuntimeFake.cpp` | The real service running as a separate process against a fake audio backend: autonomous start, singleton lock, routing edits, notifications, sample-rate requests, unplug/reconnect, self-restart and its rate limit. The script refuses to run if the fake build links any real Core Audio entry points. |
 
 Focus tests on behavior that can break audio or lose user data, not on implementation details. Hardware behavior that cannot be tested automatically should be described in the pull request, with how you verified it.

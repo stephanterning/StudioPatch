@@ -1,5 +1,47 @@
 import Foundation
 
+// Physical channel aliases belong to the interface, independently of preset UIDs.
+final class SourceLabelStore {
+    let url: URL
+    init(url: URL) { self.url=url }
+    func load() throws -> [ChannelLabelKey:String] {
+        guard FileManager.default.fileExists(atPath:url.path) else { return [:] }
+        let labels=try JSONDecoder().decode([ChannelLabel].self,from:Data(contentsOf:url))
+        var result:[ChannelLabelKey:String]=[:]
+        for label in labels {
+            let key=ChannelLabelKey(port:label.port,direction:label.direction)
+            guard !label.port.deviceUID.isEmpty, label.port.channel > 0,
+                  !label.text.isEmpty, label.text.utf8.count <= 4096, !label.text.contains("\0"),
+                  result[key] == nil else {
+                throw NSError(domain:"StudioPatch",code:35,userInfo:[NSLocalizedDescriptionKey:"Invalid interface labels. The file has not been changed."])
+            }
+            result[key]=label.text
+        }
+        return result
+    }
+    func set(_ label:ChannelLabel) throws -> [ChannelLabelKey:String] {
+        // Reload before writing: an unreadable file must never be replaced with an empty registry.
+        var labels=try load()
+        let port=label.port, text=label.text
+        guard !port.deviceUID.isEmpty, port.channel > 0, text.utf8.count <= 4096, !text.contains("\0"),
+              !text.contains("\n"), !text.contains("\r") else {
+            throw NSError(domain:"StudioPatch",code:35,userInfo:[NSLocalizedDescriptionKey:"Enter a single-line label of at most 4096 UTF-8 bytes."])
+        }
+        labels[ChannelLabelKey(port:port,direction:label.direction)]=text.isEmpty ? nil : text
+        var entries:[ChannelLabel]=labels.map { ChannelLabel(port:$0.key.port,direction:$0.key.direction,text:$0.value) }
+        entries.sort { a,b in
+            if a.port.deviceUID == b.port.deviceUID {
+                if a.direction != b.direction { return a.direction.rawValue < b.direction.rawValue }
+                return a.port.channel < b.port.channel
+            }
+            return a.port.deviceUID < b.port.deviceUID
+        }
+        try FileManager.default.createDirectory(at:url.deletingLastPathComponent(),withIntermediateDirectories:true)
+        try JSONEncoder().encode(entries).write(to:url,options:.atomic)
+        return labels
+    }
+}
+
 final class SessionStore {
     let url: URL
     private var preserveUnreadable = false

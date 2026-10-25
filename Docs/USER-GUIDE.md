@@ -12,7 +12,7 @@ This guide explains how to use the StudioPatch control panel. It assumes StudioP
 
 ## The window
 
-The **sidebar** on the left holds the virtual device settings and the list of audio interfaces. The **main area** shows the routing matrix (or channel list) for the selected direction, plus status and preset controls at the top.
+The **sidebar** on the left holds the virtual device settings and the list of audio interfaces. The **main area** shows the routing matrix for the selected direction, plus status and preset controls at the top.
 
 ### Virtual device
 
@@ -35,15 +35,16 @@ Clearing **Use** on an interface that has routes asks for confirmation. **Remove
 
 ## Routing
 
+A small legend above Destination and Source identifies the label colors: blue **Core Audio Label**, green **Interface Label**, and orange **Label Mismatch**.
+
 Use the **To Computer / From Computer** switch to pick a direction. Click a cell in the matrix to connect a source to a destination.
 
 - **One source per destination.** Selecting a new source for a destination replaces the old connection. There is no mixing, summing, gain or other processing.
 - **Unlimited fan-out.** One source can feed any number of destinations.
 - Channel numbers start at **1**. Real channel names come from each interface's driver (for example Analog 9, ADAT 3, MADI 17).
 - Row and column headers stay visible while you scroll. Hovering highlights the row and column under the pointer.
-- The **Source** column between each destination and the matrix shows its selected source (for example `← UFX III · Analog 1`). It stays visible while scrolling, updates when routing changes, and is blank for unconnected destinations. Saved routes involving an unavailable interface appear grey, like their matrix cells.
-- **Channel list** shows the same routing as a list with a menu per destination, which can be easier for large setups.
-- **Device order…** decides which interface's channels appear first in the matrix and list. This only affects the display and never interrupts audio.
+- The **Source** column between each destination and the matrix shows its selected source (for example `UFX III · Analog 1`). It stays visible while scrolling, updates when routing changes, and is blank for unconnected destinations. Saved routes involving an unavailable interface appear grey, like their matrix cells.
+- **Device order…** decides which interface's channels appear first in the matrix. This only affects the display and never interrupts audio.
 
 Routing changes are applied automatically while audio is running, without interrupting other channels. Changing channel counts, the sample rate, the Sync Source, the I/O buffer or the set of interfaces restarts the audio engine, which causes a short interruption.
 
@@ -53,8 +54,15 @@ Channel counts and routing are stored separately. If you reduce a channel count,
 
 ## Labels
 
-**Labels…** edits the virtual preset device’s **To Computer** and **From Computer** channel names. Double-click a virtual channel header to select its label, including an unconnected channel.
+**Labels…** edits the virtual preset device’s channel names under **To Computer (Core Audio)** and **From Computer (Core Audio)**. Double-click a virtual channel header to select its label, including an unconnected channel.
 
+- **Interface inputs** edits source labels shared by every preset. Double-click a physical input's vertical header to select it. These labels are saved separately in StudioPatch by interface UID, direction and channel number; removing an interface or switching presets does not remove them. Clearing a source label restores the interface and channel name (for example `UFX III · Analog 7`).
+- **Interface outputs** provides the same editing for physical outputs. In **From Computer**, double-click an output’s row header to select it. **Destination** shows its physical output label; **Source** shows the connected **From Computer N** and its actual Core Audio label.
+- Clearing an interface label, or entering its current interface/channel name, uses the automatic fallback and follows later hardware-name changes.
+- When a routed pair differs, **both labels turn orange**. Click the label you want to keep: it is copied to the other side. Clickable orange labels show the copy direction: `← label` in Source and `label →` in Destination. Source channel names have no arrow. Clicking a physical interface label writes the connected Core Audio name and verifies it by readback. Clicking a Core Audio label saves it as the physical channel’s shared StudioPatch alias.
+- In **To Computer**, Destination is Core Audio and Source is the interface input. In **From Computer**, Source is Core Audio and Destination is the interface output. Matching interface labels are green and matching Core Audio labels cyan. Unavailable or updating pairs are grey. The tooltip reads **“Label mismatch, click to copy this label to the other side”**.
+- Shared channels are updated once, and every affected row recomputes its comparison. Copying to an interface label affects all presets that use that physical channel; copying to Core Audio affects every route using that virtual channel. Other pairs may become orange. Input and output aliases with the same channel number remain independent.
+- Source edits and routing changes only recompute this comparison; copying to Core Audio is explicit. During an update or when comparison is unavailable, the source label is grey. Green is shown only after reading a matching name back from Core Audio. Failed writes keep the current name and report an error.
 - Core Audio owns the labels. Changes made in Audio MIDI Setup appear in the matrix automatically; changes applied in StudioPatch update Core Audio.
 - Edits save when you leave a field, press Return, or close the label editor with **Done** or Escape. Clearing a field removes the manual override and restores the routing-derived name. If saving fails, the editor stays open with your text and an error; press Return or Done to retry.
 - Physical interface names are read-only in StudioPatch. The names currently returned by Core Audio are displayed, without a separate original-name history.
@@ -65,7 +73,7 @@ Each preset exposes a distinct device UID, named `StudioPatch (<preset name>)`. 
 
 **Save current as new** asks whether to copy labels, create without labels, or cancel. Only names that differ from their current automatic names are copied. An equal-text manual label becomes automatic in the new preset. Copying is a one-time transfer; later edits are independent. If copying fails, the new preset remains saved and StudioPatch offers retry or discard of the remaining transfer. Keep the panel open until the transfer finishes.
 
-Manual labels are stored only in Core Audio. Older app-owned labels are no longer loaded or migrated. Import/export is not included.
+Virtual channel labels are stored only in Core Audio. Physical input and output labels are stored in StudioPatch's separate `source-labels.json` file. Neither kind marks a preset as modified. Older app-owned virtual labels are no longer loaded or migrated. Import/export is not included.
 
 ### Copy macOS channel names to Ableton Live
 
@@ -75,13 +83,29 @@ Setup) and updates the existing labels in Live's `Preferences.cfg`. Live reads
 those labels on its next launch. By default, only the **active StudioPatch preset** device is
 updated; other devices and all non-label settings are preserved.
 
+In StudioPatch, click **Tools** next to **Labels…**, then **Update labels in Ableton**.
+The tool is included in the app; Python and Xcode are not needed. It refuses to
+run while Ableton is open and creates a verified backup before changing labels.
+The window shows the full current device name, including its preset name.
+
+If the device is missing from Ableton's settings, start Live, select that exact
+StudioPatch device as its audio input and output, then quit Live and retry.
+The settings picker lists detected Live 12 versions, newest first. Select the
+version you use, or use **Choose file…** to locate a moved `Preferences.cfg`.
+StudioPatch remembers your selection and reports a missing file without creating
+a replacement. Normally no extra filesystem permission is needed. If access is
+denied, select the file with **Choose file…** and follow any macOS access prompt;
+the error message explains the privacy settings if access remains blocked.
+
+The repository also provides optional command-line tools:
+
 - **Manual:** quit Live, then double-click `Scripts/Update Ableton Names.command`.
 - **Automatic:** double-click `Scripts/Watch Ableton Names.command` and leave its
   Terminal window open. It checks every ten seconds, waits while Live is running,
   and syncs after Live exits. Ctrl-C stops it. It also picks up changes made in
   StudioPatch while Live remains closed. No login service is installed.
 
-Python 3 and Xcode Command Line Tools are required. The Core Audio reader is
+These command-line tools require Python 3 and Xcode Command Line Tools. The Core Audio reader is
 compiled on first use. The script does not start or quit Live. Let a manual sync
 finish before starting Live. A watcher checks again immediately before replacing
 preferences, but there is no atomic lock shared with Live's startup: avoid

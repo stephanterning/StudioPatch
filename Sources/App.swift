@@ -32,16 +32,19 @@ import CoreAudio
     @Published var message = "Audio latency has not been measured yet"
     @Published var error = ""
     @Published var tab = 0
-    @Published var listMode = false
     @Published var showingPresets = false
     @Published var presetSlots: [PresetSlot] = []
     @Published var showingLabels = false
+    @Published var showingTools = false
     @Published var showingDeviceOrder = false
     @Published var labelDirection = 0
     @Published var labelSelection: Port?
     @Published var pendingRemoval: Device?
     @Published var saveStatus = ""
     private let sessionStore: SessionStore
+    private let sourceLabelStore: SourceLabelStore
+    @Published private(set) var sourceLabels: [ChannelLabelKey:String] = [:]
+    @Published private(set) var updatingLabel: ChannelLabelKey?
     private var autosaveReady = false
     private var timer: Timer?
     private var inventoryTicks=0
@@ -149,7 +152,81 @@ import CoreAudio
             }
         }
     }
-    // Hardware names are read-only. Virtual labels are read from Core Audio.
+    func interfaceLabel(_ port:Port, input:Bool) -> String {
+        sourceLabels[ChannelLabelKey(port:port,direction:input ? .input : .output)] ??
+            ports(input:input).first(where: { $0.0 == port })?.1 ?? "\(port.deviceUID) · \(input ? "Input" : "Output") \(port.channel)"
+    }
+    func inputSourceLabel(_ port:Port) -> String { interfaceLabel(port,input:true) }
+    func outputDestinationLabel(_ port:Port) -> String { interfaceLabel(port,input:false) }
+    func outputSourceChannel(_ port:Port) -> Int? {
+        preset.activeOutputs.first { $0.deviceUID == port.deviceUID && $0.channel == port.channel }?.virtualChannel
+    }
+    private func labelStatus(_ port:Port, channel:Int, input:Bool) -> LabelMatchStatus {
+        let key=ChannelLabelKey(port:Port(deviceUID:preset.deviceUID,channel:channel),direction:input ? .input : .output)
+        if updatingLabel == key { return .updating }
+        guard canConnect(port,input:input), let device=virtualDevice else { return .unavailable }
+        let names=input ? device.inputNames : device.outputNames
+        guard channel > 0, channel <= (input ? device.inputs : device.outputs),
+              names.indices.contains(channel-1), !names[channel-1].isEmpty else { return .unavailable }
+        return interfaceLabel(port,input:input) == names[channel-1] ? .matched : .mismatch
+    }
+    func inputLabelStatus(_ row:Int) -> LabelMatchStatus {
+        guard preset.activeInputs.indices.contains(row), let port=preset.activeInputs[row] else { return .unavailable }
+        return labelStatus(port,channel:row+1,input:true)
+    }
+    func outputLabelStatus(_ port:Port) -> LabelMatchStatus {
+        guard let channel=outputSourceChannel(port) else { return .unavailable }
+        return labelStatus(port,channel:channel,input:false)
+    }
+    func updateInputLabel(_ row:Int, from side:LabelSide = .source) {
+        guard inputLabelStatus(row) == .mismatch, let port=preset.activeInputs[row] else { return }
+        updateRoutedLabel(port,channel:row+1,input:true,fromHardware:side == .source)
+    }
+    func updateOutputLabel(_ port:Port, from side:LabelSide = .destination) {
+        guard outputLabelStatus(port) == .mismatch, let channel=outputSourceChannel(port) else { return }
+        updateRoutedLabel(port,channel:channel,input:false,fromHardware:side == .destination)
+    }
+    private func updateRoutedLabel(_ port:Port, channel:Int, input:Bool, fromHardware:Bool) {
+        guard !ioBusy else { return }
+        if !fromHardware {
+            // Copy the displayed Core Audio name to this physical channel's shared alias.
+            // Other routes using that physical channel recompute their comparisons.
+            error=""
+            editLabel(ChannelLabel(port:port,direction:input ? .input : .output,
+                                   text:exposedChannelName(channel,input:input)))
+            return
+        }
+        let uid=preset.deviceUID, text=interfaceLabel(port,input:input)
+        let target=ChannelLabelKey(port:Port(deviceUID:uid,channel:channel),direction:input ? .input : .output)
+        updatingLabel=target
+        performIO("Updating name in Core Audio…") {
+            defer { self.updatingLabel=nil }
+            @MainActor func checkRoute() throws {
+                let connected=input
+                    ? (self.preset.activeInputs.indices.contains(channel-1) && self.preset.activeInputs[channel-1] == port)
+                    : self.outputSourceChannel(port) == channel
+                guard self.preset.deviceUID == uid, connected, self.interfaceLabel(port,input:input) == text else {
+                    throw self.labelError("The preset, routing or label changed. Check the routing and try again.")
+                }
+            }
+            try checkRoute()
+            try await self.labelWriter(ChannelLabel(port:target.port,direction:target.direction,text:text))
+            let snapshot=try await self.labelReader(uid)
+            try checkRoute()
+            guard snapshot.uid == uid, snapshot.inputs.count == self.preset.inputCount,
+                  snapshot.outputs.count == self.preset.outputCount,
+                  let index=self.devices.firstIndex(where: { $0.uid == uid }) else {
+                throw self.labelError("Could not verify the updated name in Core Audio. Try again when the device is ready.")
+            }
+            let device=self.devices[index]
+            self.devices[index]=Device(id:device.id,uid:device.uid,name:device.name,inputs:device.inputs,outputs:device.outputs,
+                                       sampleRate:device.sampleRate,aggregate:device.aggregate,inputNames:snapshot.inputs,
+                                       outputNames:snapshot.outputs,sampleRates:device.sampleRates)
+            let names=input ? snapshot.inputs : snapshot.outputs
+            guard names[channel-1] == text else { throw self.labelError("Core Audio has not applied the name. Click the orange label to retry.") }
+        }
+    }
+    // Hardware names remain read-only; source aliases are stored separately.
     func computerPorts(_ channel: Int, input: Bool) -> [Port] {
         guard channel > 0, channel <= (input ? preset.inputCount : preset.outputCount) else { return [] }
         let connected: Set<Port>
@@ -174,8 +251,9 @@ import CoreAudio
     }
     func computerName(_ channel: Int, input: Bool, multiline: Bool = false) -> String {
         let name="\(input ? "To Computer" : "From Computer") \(channel)"
+        if multiline { return name + "\n" + exposedChannelName(channel,input:input) }
         let label=computerLabel(channel,input:input)
-        return name + (label.isEmpty ? "" : (multiline ? "\n" : " — ") + label)
+        return name + (label.isEmpty ? "" : " — " + label)
     }
     func exposedChannelName(_ channel: Int, input: Bool) -> String {
         if let device=virtualDevice {
@@ -189,20 +267,45 @@ import CoreAudio
         openLabels(port:Port(deviceUID:preset.deviceUID,channel:channel),direction:input ? 0 : 1)
     }
     func openLabels(port: Port? = nil, direction: Int? = nil) {
-        // Physical interface names are never editable in StudioPatch.
-        guard port == nil || port?.deviceUID == preset.deviceUID else { return }
+        if let port, port.deviceUID != preset.deviceUID {
+            let input=(direction ?? tab) == 0
+            guard ports(input:input).contains(where: { $0.0 == port }) else { return }
+            labelDirection=input ? 2 : 3
+        } else { labelDirection=(direction ?? tab) == 0 ? 0 : 1 }
         labelSelection=port
-        labelDirection=(direction ?? tab) == 0 ? 0 : 1
         showingLabels=true
     }
     var labelEntries: [LabelEntry] {
+        if labelDirection >= 2 {
+            let input=labelDirection == 2
+            return ports(input:input).map { LabelEntry(port:$0.0,direction:input ? .input : .output,name:interfaceLabel($0.0,input:input),device:$0.1) }
+        }
         let input=labelDirection == 0
         return (0..<(input ? preset.inputCount : preset.outputCount)).map { index in
             LabelEntry(port:Port(deviceUID:preset.deviceUID,channel:index+1),direction:input ? .input : .output,
                        name:exposedChannelName(index+1,input:input),device:"\(input ? "To Computer" : "From Computer") \(index+1)")
         }
     }
+    func currentLabelName(_ entry:LabelEntry) -> String {
+        let input=entry.direction == .input
+        return entry.port.deviceUID == preset.deviceUID
+            ? exposedChannelName(entry.port.channel,input:input)
+            : interfaceLabel(entry.port,input:input)
+    }
     func editLabel(_ label:ChannelLabel, completion:@escaping (Bool)->Void = { _ in }) {
+        if label.port.deviceUID != preset.deviceUID {
+            do {
+                guard let original=ports(input:label.direction == .input).first(where: { $0.0 == label.port })?.1 else {
+                    throw labelError("The interface channel is no longer available in this preset.")
+                }
+                let text=label.text.trimmingCharacters(in:.whitespacesAndNewlines)
+                // The field can publish its displayed fallback again after clearing/focus loss.
+                // A name equal to the current interface name must remain automatic.
+                sourceLabels=try sourceLabelStore.set(ChannelLabel(port:label.port,direction:label.direction,text:text == original ? "" : text))
+                completion(true)
+            } catch { self.error=error.localizedDescription; completion(false) }
+            return
+        }
         performIO("Updating label in Core Audio…") {
             guard label.port.deviceUID == self.preset.deviceUID else { throw self.labelError("The preset changed. Reopen the label editor.") }
             do {
@@ -278,6 +381,9 @@ import CoreAudio
         self.liveRuntime=discoverDevices
         self.inventoryReader=inventoryReader
         sessionStore = store
+        sourceLabelStore=SourceLabelStore(url:store.url.deletingLastPathComponent().appendingPathComponent("source-labels.json"))
+        do { sourceLabels=try sourceLabelStore.load() }
+        catch { self.error="Could not load interface labels: \(error.localizedDescription)" }
         var isNewSession = false
         do {
             if let restored = try store.load() {
@@ -489,15 +595,15 @@ struct ContentView: View {
                 HStack {
                     Picker("Direction",selection:$m.tab) { Text("To Computer").tag(0); Text("From Computer").tag(1) }.pickerStyle(.segmented).labelsHidden().fixedSize()
                     Spacer()
-                    Toggle("Channel list",isOn:$m.listMode).toggleStyle(.switch)
                     Button("Device order…") { m.showingDeviceOrder=true }
                     Button("Labels…") { m.openLabels() }
+                    Button("Tools") { m.showingTools=true }
                 }
                 if m.preset.dormantRouteCount > 0 {
                     Text("\(m.preset.dormantRouteCount) saved routes are inactive. They carry no audio and reactivate when the channel count increases.")
                         .font(.caption).foregroundStyle(.orange)
                 }
-                if m.listMode { channelList } else { matrix }
+                matrix
                 if !m.labelNotice.isEmpty {
                     HStack {
                         Text(m.labelNotice).font(.caption).foregroundStyle(.orange)
@@ -522,6 +628,7 @@ struct ContentView: View {
         .preferredColorScheme(.dark)
         .sheet(isPresented:$m.showingPresets) { PresetLibraryEditor(m:m) }
         .sheet(isPresented:$m.showingLabels) { LabelEditor(m:m) }
+        .sheet(isPresented:$m.showingTools) { ToolsEditor(m:m) }
         .sheet(isPresented:$m.showingDeviceOrder) { DeviceOrderEditor(m:m) }
         .alert("Remove audio interface?",isPresented:Binding(get:{m.pendingRemoval != nil},set:{if !$0 {m.pendingRemoval=nil}})) {
             Button("Cancel",role:.cancel) { m.pendingRemoval=nil }
@@ -624,8 +731,8 @@ struct ContentView: View {
     }
     var matrix: some View {
         let ins=m.ports(input:true),outs=m.ports(input:false)
-        let rows=m.tab==0 ? (0..<m.preset.inputCount).map {m.computerName($0+1,input:true,multiline:true)} : outs.map(\.1)
-        let cols=m.tab==0 ? ins.map(\.1) : (0..<m.preset.outputCount).map {m.computerName($0+1,input:false,multiline:true)}
+        let rows=m.tab==0 ? (0..<m.preset.inputCount).map {m.computerName($0+1,input:true,multiline:true)} : outs.map { $0.1 + "\n" + m.outputDestinationLabel($0.0) }
+        let cols=m.tab==0 ? ins.map { $0.1 + "\n" + m.inputSourceLabel($0.0) } : (0..<m.preset.outputCount).map {m.computerName($0+1,input:false,multiline:true)}
         var active=Set<Int>()
         if m.tab==0 {
             for(r,p) in m.preset.activeInputs.enumerated() {if let c=ins.firstIndex(where:{$0.0==p}) {active.insert(r*cols.count+c)}}
@@ -636,7 +743,13 @@ struct ContentView: View {
         }
         let unavailableRows = m.tab == 0 ? Set<Int>() : Set(outs.indices.filter { !m.canConnect(outs[$0].0,input:false) })
         let unavailableColumns = m.tab == 0 ? Set(ins.indices.filter { !m.canConnect(ins[$0].0,input:true) }) : Set<Int>()
-        return Matrix(rows:rows,columns:cols,selected:active,enabled:!m.ioBusy,unavailableRows:unavailableRows,unavailableColumns:unavailableColumns,onHeaderDoubleClick:{row,index in
+        return Matrix(rows:rows,columns:cols,selected:active,enabled:!m.ioBusy,unavailableRows:unavailableRows,unavailableColumns:unavailableColumns,
+                      showsInputLabels:m.tab == 0,
+                      rowLabelStatuses:m.tab == 0 ? (0..<m.preset.inputCount).map { m.inputLabelStatus($0) } : outs.map { m.outputLabelStatus($0.0) },
+                      onLabelSyncClick:{ row,side in
+                          if m.tab == 0 { m.updateInputLabel(row,from:side) }
+                          else { m.updateOutputLabel(outs[row].0,from:side) }
+                      },onHeaderDoubleClick:{row,index in
             if m.tab == 0 {
                 if row { m.openComputerLabels(index+1,input:true) }
                 else { m.openLabels(port:ins[index].0,direction:0) }
@@ -649,32 +762,7 @@ struct ContentView: View {
             else {m.setOutput(outs[r].0,channel:active.contains(r*cols.count+c) ? 0 : c+1)}
         }
     }
-    var channelList: some View {
-        ScrollView {
-            LazyVStack(alignment:.leading) {
-                if m.tab==0 {
-                    ForEach(0..<m.preset.inputCount,id:\.self) {r in
-                        Picker(m.computerName(r+1,input:true),selection:Binding(get:{m.preset.inputs[r]},set:{m.setInput(r,port:$0)} )) {
-                            Text("Not connected").tag(Port?.none)
-                            ForEach(m.inputPorts.map(\.0),id:\.self) {p in
-                                Text(m.inputPorts.first {$0.0==p}!.1 + (m.canConnect(p,input:true) ? "" : " (unavailable)")).tag(Optional(p)).disabled(!m.canConnect(p,input:true))
-                            }
-                        }.padding(5)
-                    }
-                } else {
-                    ForEach(m.outputPorts.map(\.0),id:\.self) {p in
-                        Picker(m.outputPorts.first {$0.0==p}!.1 + (m.canConnect(p,input:false) ? "" : " (unavailable)"),selection:Binding(get:{m.preset.outputs.first {$0.deviceUID==p.deviceUID && $0.channel==p.channel}?.virtualChannel ?? 0},set:{m.setOutput(p,channel:$0)})) {
-                            Text("Not connected").tag(0)
-                            if let route=m.preset.outputs.first(where:{$0.deviceUID==p.deviceUID && $0.channel==p.channel}), route.virtualChannel > m.preset.outputCount {
-                                Text("From Computer \(route.virtualChannel) (inactive)").tag(route.virtualChannel)
-                            }
-                            ForEach(0..<m.preset.outputCount,id:\.self) {Text(m.computerName($0+1,input:false)).tag($0+1).disabled(!m.canConnect(p,input:false))}
-                        }.padding(5)
-                    }
-                }
-            }
-        }.disabled(m.ioBusy)
-    }
+
 }
 struct PresetLibraryEditor: View {
     @ObservedObject var m: Model
@@ -789,7 +877,7 @@ struct DeviceOrderEditor: View {
                 Spacer()
                 Button("Done") { m.showingDeviceOrder=false }.keyboardShortcut(.defaultAction)
             }
-            Text("Choose which device's channels appear first in the routing matrix and channel list. Changes are saved automatically.")
+            Text("Choose which device's channels appear first in the routing matrix. Changes are saved automatically.")
                 .font(.callout).foregroundStyle(.secondary)
             ScrollView {
                 VStack(spacing:8) {
@@ -819,7 +907,7 @@ struct LabelEditor: View {
     @State private var failed=false
     @State private var closing=false
     @FocusState private var focused: String?
-    private func key(_ entry:LabelEntry) -> String { "\(entry.direction.rawValue):\(entry.port.channel)" }
+    private func key(_ entry:LabelEntry) -> String { "\(entry.port.deviceUID):\(entry.direction.rawValue):\(entry.port.channel)" }
     private func commit() {
         guard !saving, !failed, !m.ioBusy else { return }
         guard let id=drafts.keys.sorted().first, let label=drafts[id] else {
@@ -831,6 +919,7 @@ struct LabelEditor: View {
             saving=false
             if success {
                 if drafts[id]?.text == label.text { drafts.removeValue(forKey:id) }
+                Task { @MainActor in commit() }
             } else { failed=true; closing=false }
             // Model ends its I/O operation after this completion callback.
         }
@@ -846,12 +935,21 @@ struct LabelEditor: View {
                 Spacer()
                 Button("Done",action:finish).keyboardShortcut(.defaultAction)
             }
-            Text("Labels are saved to Core Audio when you leave a field or press Return. Clear a field to use its routing name. Physical interface names are read-only here.")
+            Text(m.labelDirection >= 2
+                 ? "Interface input and output labels are shared by all presets and saved in StudioPatch. Clear a field to use the interface channel name. When labels differ, both are orange. Click either label to copy it to the other side."
+                 : "Labels are saved to Core Audio when you leave a field or press Return. Clear a field to use its routing name.")
                 .font(.callout).foregroundStyle(.secondary)
-            Picker("Channels",selection:$m.labelDirection) {
-                Text("To Computer").tag(0)
-                Text("From Computer").tag(1)
-            }.pickerStyle(.segmented)
+                .frame(maxWidth:.infinity,alignment:.leading)
+                .frame(height:48,alignment:.topLeading)
+            VStack(alignment:.leading,spacing:6) {
+                Text("Channels").font(.callout).foregroundStyle(.secondary)
+                Picker("Channels",selection:$m.labelDirection) {
+                    Text("To Computer (Core Audio)").tag(0)
+                    Text("From Computer (Core Audio)").tag(1)
+                    Text("Interface inputs").tag(2)
+                    Text("Interface outputs").tag(3)
+                }.pickerStyle(.segmented).labelsHidden()
+            }
             ScrollViewReader { proxy in
                 ScrollView {
                     LazyVStack(alignment:.leading,spacing:8) {
@@ -861,8 +959,10 @@ struct LabelEditor: View {
                                     Text(entry.device)
                                     Text(entry.name).font(.caption).foregroundStyle(.secondary).lineLimit(2)
                                 }.frame(width:220,alignment:.leading)
-                                TextField("Empty uses routing name",text:Binding(
-                                    get:{ drafts[key(entry)]?.text ?? entry.name },
+                                TextField(m.labelDirection >= 2 ? "Empty uses interface name" : "Empty uses routing name",text:Binding(
+                                    // A synchronous interface save can finish before this row is rebuilt.
+                                    // Read the model, not the old entry captured by the binding.
+                                    get:{ drafts[key(entry)]?.text ?? m.currentLabelName(entry) },
                                     set:{ drafts[key(entry)]=ChannelLabel(port:entry.port,direction:entry.direction,text:$0); failed=false }
                                 ))
                                 .textFieldStyle(.roundedBorder)
@@ -875,10 +975,23 @@ struct LabelEditor: View {
                         }
                     }.id(m.labelDirection)
                 }.onAppear { if let selected=m.labelSelection { proxy.scrollTo(selected,anchor:.center) } }
-            }
-            if saving { ProgressView("Saving labels…").controlSize(.small) }
-            if !m.error.isEmpty { Text(m.error).font(.caption).foregroundStyle(.orange) }
-        }.padding(24).frame(width:740,height:580)
+            }.frame(maxWidth:.infinity,maxHeight:.infinity)
+            HStack(spacing:8) {
+                if saving {
+                    ProgressView().progressViewStyle(.circular).controlSize(.small)
+                        .frame(width:16,height:16)
+                    Text("Saving labels…").font(.caption).foregroundStyle(.secondary)
+                }
+                if !m.error.isEmpty {
+                    Text(m.error).font(.caption).foregroundStyle(.orange)
+                        .lineLimit(2).help(m.error)
+                }
+                Spacer(minLength:0)
+            }.frame(height:40,alignment:.top)
+        }
+        // Reserve the same space for help and status in every tab, including while saving.
+        .frame(width:852,height:592,alignment:.topLeading)
+        .padding(24)
         .interactiveDismissDisabled()
         .onExitCommand(perform:finish)
         .onChange(of:focused) { old,_ in if old != nil { failed=false; commit() } }
@@ -895,7 +1008,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             if let window=event.window,
                let editor=window.firstResponder as? NSTextView, editor.isFieldEditor,
                let field=editor.delegate as? NSTextField,
-               ["To Computer","From Computer","Empty uses routing name"].contains(field.placeholderString ?? ""),
+               ["To Computer","From Computer","Empty uses routing name","Empty uses interface name"].contains(field.placeholderString ?? ""),
                !field.bounds.contains(field.convert(event.locationInWindow,from:nil)) {
                 window.makeFirstResponder(nil)
             }
