@@ -102,7 +102,6 @@ import Foundation
         let old = try JSONDecoder().decode(Preset.self,from:JSONSerialization.data(withJSONObject:legacy))
         try old.validate()
         precondition(old.followMaster == nil && old.inputs.count == 18)
-        precondition(old.channelLabels == nil)
         precondition(old.automaticTransportMargin == nil)
         // One source may feed several destinations in either direction.
         var fanout = Preset()

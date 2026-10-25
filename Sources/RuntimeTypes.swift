@@ -138,7 +138,7 @@ enum AudioWorker {
     }
 }
 
-func runtimeChannelNames(preset:Preset,devices:[Device],includeLegacyLabels:Bool=false) throws -> String {
+func runtimeChannelNames(preset:Preset,devices:[Device]) throws -> String {
     func name(_ channel:Int,input:Bool)->String {
         let connected:Set<Port> = input ? Set(preset.activeInputs.indices.contains(channel-1) ? [preset.activeInputs[channel-1]].compactMap{$0} : []) : Set(preset.activeOutputs.filter{$0.virtualChannel==channel}.map{Port(deviceUID:$0.deviceUID,channel:$0.channel)})
         var labels:[String]=[]
@@ -146,8 +146,7 @@ func runtimeChannelNames(preset:Preset,devices:[Device],includeLegacyLabels:Bool
             for (index,original) in device.channelNames(input:input).enumerated() {
                 let port=Port(deviceUID:device.uid,channel:index+1)
                 guard connected.contains(port) else {continue}
-                let custom=includeLegacyLabels ? preset.label(for:port,direction:input ? .input : .output) : ""
-                let text=custom.isEmpty ? "\(device.shortName) · \(original)" : custom
+                let text="\(device.shortName) · \(original)"
                 if !labels.contains(text){labels.append(text)}
             }
         }

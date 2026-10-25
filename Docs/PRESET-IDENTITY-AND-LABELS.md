@@ -87,12 +87,10 @@ Before implementation can be considered ready, verify:
 - Exclusion of labels from preset serialization, ordinary save/load behavior and the `*` modified-state comparison.
 - The observed behavior of Audio MIDI Setup and supported DAWs during device identity/name changes, including any integration currently assuming the single fixed StudioPatch UID.
 
-## Legacy migration
+## Persistence
 
-The initially active legacy preset retains `se.studiopatch.device.v1` so existing Core Audio aliases keep their identity. Other old presets receive a UID derived from their existing UUID. New presets receive fresh UUIDs; rename and overwrite retain the destination identity.
+Every newly created preset, including the initial default, receives a UID derived from its new UUID. Rename and overwrite retain the destination identity. Loading existing presets uses their stored identities without converting or rewriting the library.
 
-Before migration, original session/library files containing legacy labels are copied to `.before-core-audio-labels` backups. Legacy fields remain decodable and are retained until that preset is activated and migration succeeds. They do not affect physical display names, automatic defaults, or dirty-state comparisons. On activation, old physical labels are mapped through current routing to exposed virtual channels and written via HAL only where the effective name still equals its default. Existing different Core Audio names win. After success, the legacy field is removed from the session and active library entry.
-
-Unused labels and dormant-channel labels remain recoverable in the original backup; no physical channel is renamed. Backups are passive recovery files, never a label registry or an ordinary preset-load restoration source. Failed migration is visible and retryable. There is no new label snapshot, reset, import or export workflow.
+Manual labels are stored only in Core Audio. The old app-owned label field and its migration, backup and retry workflow have been removed. Older app-owned labels are ignored; no automatic transfer is performed.
 
 Copy failure leaves the new preset saved and reports the remaining labels. A transient in-memory queue supports retry or explicit discard, including returning to the destination preset first. Closing the panel loses that pending transfer; no labels are written into presets to persist it.

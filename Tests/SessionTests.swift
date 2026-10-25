@@ -18,16 +18,11 @@ import AppKit
         app.preset.masterUID = "ufx"
         app.preset.devices = [Member(uid:"ufx",drift:false),Member(uid:"zed",drift:false)]
         let labelledPort = Port(deviceUID:"ufx",channel:9)
-        app.preset.setLabel("Vocal microphone",for:labelledPort,direction:.input)
-        app.preset.setLabel("Monitor left",for:labelledPort,direction:.output)
-        app.preset.setLabel("Synth",for:Port(deviceUID:"zed",channel:9),direction:.input)
         // No save action or quit hook: a fresh Model reads every previous edit.
         let reopened = Model(store:SessionStore(url:url),discoverDevices:false)
         precondition(reopened.preset.inputCount == 2 && reopened.preset.outputCount == 1)
         precondition(reopened.preset.dormantRouteCount == 2)
         precondition(reopened.preset.masterUID == "ufx" && reopened.preset.devices.count == 2)
-        precondition(reopened.preset.label(for:labelledPort,direction:.input) == "Vocal microphone")
-        precondition(reopened.preset.label(for:labelledPort,direction:.output) == "Monitor left")
         reopened.devices = [Device(id:123,uid:"ufx",name:"Fireface UFX III",inputs:9,outputs:9,sampleRate:96000,aggregate:false,
             inputNames:(1...9).map { "Analog \($0)" },outputNames:(1...9).map { "Analog \($0)" })]
         reopened.openLabels(port:labelledPort,direction:1)
@@ -42,8 +37,12 @@ import AppKit
         let savedSlot=try slotsModel.preset.encoded()
         slotsModel.preset.inputCount=1
         slotsModel.preset.deviceDisplayOrder=["zed","ufx"]
+        let libraryURL=slotsURL.deletingLastPathComponent().appendingPathComponent("presets.json")
+        let libraryBefore=try Data(contentsOf:libraryURL)
         let reopenedSlots=Model(store:SessionStore(url:slotsURL),discoverDevices:false)
         try reopenedSlots.restoreActivePreset()
+        let libraryAfter=try Data(contentsOf:libraryURL)
+        precondition(libraryAfter==libraryBefore && reopenedSlots.preset.deviceUID==slotsModel.preset.deviceUID)
         precondition(reopenedSlots.preset.activePresetID==slotID && reopenedSlots.presetIsModified)
         precondition(reopenedSlots.preset.inputCount==1 && reopenedSlots.activePresetTitle=="Studio *")
         reopenedSlots.openPresets()
@@ -75,6 +74,16 @@ import AppKit
         precondition((try? reopenedSlots.preset.encoded()) == currentBeforeDelete)
         let stored=try PresetLibraryStore(url:slotsURL.deletingLastPathComponent().appendingPathComponent("presets.json")).load()
         precondition(stored.count==1 && stored[0].id==otherID && stored[0].configuration.inputCount==5)
+        let freshURL=directory.appendingPathComponent("fresh/session.json")
+        let fresh=Model(store:SessionStore(url:freshURL),discoverDevices:false)
+        fresh.labelReader={ _ in preconditionFailure("Restoring a preset must not read labels") }
+        fresh.labelWriter={ _ in preconditionFailure("Restoring a preset must not write labels") }
+        try fresh.restoreActivePreset()
+        let freshID=fresh.preset.activePresetID!
+        precondition(fresh.preset.deviceUID==Preset.uid(for:freshID) && !fresh.presetIsModified)
+        let freshReopened=Model(store:SessionStore(url:freshURL),discoverDevices:false)
+        try freshReopened.restoreActivePreset()
+        precondition(freshReopened.preset.activePresetID==freshID && freshReopened.preset.deviceUID==fresh.preset.deviceUID)
         let orderURL=directory.appendingPathComponent("order.json")
         let ordered=Model(store:SessionStore(url:orderURL),discoverDevices:false)
         ordered.devices=[
@@ -132,7 +141,7 @@ import AppKit
         let copied=try await computer.saveAsNew(name:"Copied",copyLabels:true)
         precondition(computer.preset.activePresetID==copied && computer.preset.deviceUID != uid)
         precondition(writes.count==1 && writes[0].text=="Custom" && writes[0].port.deviceUID==computer.preset.deviceUID)
-        precondition(computer.preset.channelLabels==nil && !computer.presetIsModified && computer.pendingLabelCopy==nil)
+        precondition(!computer.presetIsModified && computer.pendingLabelCopy==nil)
         let storedNew=try String(contentsOf:directory.appendingPathComponent("computer.json"),encoding:.utf8)
         precondition(!storedNew.contains("Custom") && !storedNew.contains("channelLabels"))
         writes=[]
@@ -160,30 +169,6 @@ import AppKit
         for _ in 0..<100 where computer.ioBusy { try await Task.sleep(nanoseconds:10_000_000) }
         precondition(writes.last?.text=="" && writes.last?.port==target)
         precondition(computer.preset.comparisonData()==beforeLabelEdit && !computer.presetIsModified)
-        precondition(computer.preset.channelLabels==nil)
-        // Existing aliases win migration. Fan-out maps one legacy physical label
-        // to each exposed virtual channel; never write to that physical port.
-        let migrationURL=directory.appendingPathComponent("migration/session.json")
-        let migration=Model(store:SessionStore(url:migrationURL),discoverDevices:false)
-        migration.devices=reopened.devices
-        migration.preset.devices=reopened.preset.devices
-        migration.preset.inputs[0]=labelledPort;migration.preset.inputs[1]=labelledPort
-        migration.preset.setLabel("Old label",for:labelledPort,direction:.input)
-        try migration.restoreActivePreset()
-        precondition(migration.preset.deviceUID==Preset.virtualUID)
-        let base=try JSONSerialization.jsonObject(with:Data(migration.channelNamesPayload().utf8)) as! [String:[String]]
-        var actual=base["inputs"]!;actual[0]="Existing Core Audio label"
-        migration.updateInventory(migration.devices+[Device(id:46,uid:migration.preset.deviceUID,name:"StudioPatch",inputs:18,outputs:18,sampleRate:96000,aggregate:false,inputNames:actual,outputNames:base["outputs"]!)])
-        migration.labelReader={ uid in CoreAudioLabels(uid:uid,inputs:actual,outputs:base["outputs"]!,defaultInputs:base["inputs"]!,defaultOutputs:base["outputs"]!) }
-        var migrated:[ChannelLabel]=[]
-        migration.labelWriter={ migrated.append($0) }
-        migration.migrateLegacyLabelsIfReady()
-        for _ in 0..<100 where migration.ioBusy { try await Task.sleep(nanoseconds:10_000_000) }
-        precondition(migration.preset.channelLabels==nil && migration.activeSlot?.configuration.channelLabels==nil)
-        precondition(migrated.count==1 && migrated[0].port==Port(deviceUID:Preset.virtualUID,channel:2) && migrated[0].text=="Old label")
-        let backup=try String(contentsOf:migrationURL.appendingPathExtension("before-core-audio-labels"),encoding:.utf8)
-        precondition(backup.contains("Old label"))
-        precondition(reopened.inputPorts[8].1=="UFX III · Analog 9") // Legacy labels do not rename hardware.
         reopened.preset.inputCount = 37; reopened.preset.outputCount = 21
         precondition(reopened.preset.activeInputs[36] == Port(deviceUID:"ufx",channel:9))
         precondition(reopened.preset.activeOutputs[0].virtualChannel == 21)
@@ -243,8 +228,6 @@ import AppKit
         offline.updateInventory([card])
         offline.requestToggle(card)
         let input=Port(deviceUID:card.uid,channel:2), output=Port(deviceUID:card.uid,channel:3)
-        offline.preset.setLabel("Synth",for:input,direction:.input)
-        offline.preset.setLabel("Echo",for:output,direction:.output)
         offline.setInput(0,port:input); offline.setOutput(output,channel:2)
         offline.preset.inputs[17]=input // Dormant routes are retained too.
         offline.preset.inputCount=2
@@ -347,16 +330,5 @@ import AppKit
         for _ in 0..<100 where probe.ioBusy { try await Task.sleep(nanoseconds:10_000_000) }
         precondition(!probe.ioBusy && probe.ioStatus.isEmpty)
         print("PASS: actual Model autosave/reopen, dormant routes, empty edits, growth, corrupt backup and write failure")
-    }
-}
-
-// Test fixtures for the old serialized format; production has no label mutator.
-extension Preset {
-    mutating func setLabel(_ text: String, for port: Port, direction: PortDirection) {
-        guard port.deviceUID != Self.virtualUID else { return }
-        var labels = channelLabels ?? []
-        labels.removeAll { $0.port == port && $0.direction == direction }
-        if !text.isEmpty { labels.append(ChannelLabel(port:port,direction:direction,text:text)) }
-        channelLabels = labels.isEmpty ? nil : labels
     }
 }

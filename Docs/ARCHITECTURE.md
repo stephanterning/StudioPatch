@@ -106,13 +106,13 @@ Presets store a stable `virtualDeviceUID` and the current `virtualDeviceName`. T
 
 The service publishes routing-derived defaults through `spnm` and display names through `spdn`. The panel writes manual aliases using HAL’s `kAudioObjectPropertyElementName`; an empty CFString clears an alias. Writes verify the expected active UID and channel direction/count. No physical-interface name setter is exposed. The panel reads the effective virtual names from inventory. Wildcard-element listeners wake the service, and a file observer delivers its inventory snapshot to the panel without waiting for the polling timer. Timers remain fallback paths.
 
-Manual aliases are not part of preset comparison or new preset serialization. Save-as-new obtains effective/default names before switching and copies only differing strings to the new UID. Pending transfers live in memory and errors report partial completion. Legacy migration and the outstanding native HAL lifecycle checks are described in [the design](PRESET-IDENTITY-AND-LABELS.md) and [verification record](LABEL-VERIFICATION.md).
+Manual aliases are not part of preset comparison or new preset serialization. Save-as-new obtains effective/default names before switching and copies only differing strings to the new UID. Pending transfers live in memory and errors report partial completion. Label ownership and the outstanding native HAL lifecycle checks are described in [the design](PRESET-IDENTITY-AND-LABELS.md) and [verification record](LABEL-VERIFICATION.md).
 
 ## Files on disk
 
 | Location | Written by | Contents |
 |---|---|---|
-| `~/Library/Application Support/StudioPatch/last-session.json` | Panel | Current configuration: channel counts, routes (including inactive ones), interfaces, display order, active preset UID/display name. Legacy labels are retained only until migration. |
+| `~/Library/Application Support/StudioPatch/last-session.json` | Panel | Current configuration: channel counts, routes (including inactive ones), interfaces, display order, active preset UID/display name. Manual labels are stored only in Core Audio. |
 | `~/Library/Application Support/StudioPatch/presets.json` | Panel | Named presets. |
 | `~/Library/Application Support/StudioPatch/runtime-status.json` | Service | Live status, device inventory and timing diagnostics. |
 | `~/Library/Application Support/StudioPatch/recovery-attempt.json` | Service | Time of the last automatic self-restart. Do not delete it to force retries. |

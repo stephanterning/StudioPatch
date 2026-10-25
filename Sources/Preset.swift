@@ -50,15 +50,9 @@ struct Preset: Codable {
     var deviceDisplayOrder: [String]? = nil
     var inputs: [Port?] = Array(repeating: nil, count: 18)
     var outputs: [Playback] = []
-    // Legacy migration input only. New labels are written directly to Core Audio.
-    var channelLabels: [ChannelLabel]? = nil
     // Older sessions inherit the former global setting until each device has its own lock.
     func isSyncLocked(_ uid: String) -> Bool {
         devices.first { $0.uid == uid }?.syncLocked ?? (followMaster != false)
-    }
-    func label(for port: Port, direction: PortDirection) -> String {
-        guard port.deviceUID != Self.virtualUID else { return "" }
-        return channelLabels?.first { $0.port == port && $0.direction == direction }?.text ?? ""
     }
     // Routing is persistent; exposed widths only select its active subset.
     mutating func resizeChannels() {
@@ -85,7 +79,6 @@ struct Preset: Codable {
             configuration.virtualDeviceName = nil
             configuration.deviceDisplayOrder = nil
             configuration.knownDevices = nil
-            configuration.channelLabels = nil
             configuration.inputs = activeInputs
             configuration.outputs = activeOutputs
         }
@@ -97,7 +90,6 @@ struct Preset: Codable {
         configuration.activePresetID=nil
         configuration.virtualDeviceUID=nil
         configuration.virtualDeviceName=nil
-        configuration.channelLabels=nil
         // Discovery metadata is refreshed by Core Audio, not edited by the user.
         configuration.knownDevices=nil
         configuration.resizeChannels()

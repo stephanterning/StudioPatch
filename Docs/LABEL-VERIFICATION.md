@@ -34,7 +34,7 @@ No private macOS audio preference keys are used by the implementation. Read-only
 ## Automated coverage
 
 - Driver: version 1 compatibility and version 2 UID validation; UID changes create new endpoint objects; old clients are retired and muted; defaults do not cross identities; display-name edits retain the same UID/object; configuration reload retains UID.
-- Model: unique new identities, stable rename/save identities, physical names read-only, effective HAL names in the matrix, no label dirty marker, no manual labels in newly saved presets, copy/no-copy, read failure before creation, partial write failure with retry, clearing via the HAL writer, migration backups and precedence of existing aliases.
+- Model: unique new identities, stable rename/save identities, physical names read-only, effective HAL names in the matrix, no label dirty marker, no manual labels in newly saved presets, copy/no-copy, read failure before creation, partial write failure with retry, clearing via the HAL writer, fresh default identities and reopening without rewriting the library.
 - Runtime: metadata rename does not restart or update routing; changing only UID restarts/reconfigures, including returning to an earlier UID. Existing recovery and routing suites remain in place.
 
 Validation completed: all 8 CTest suites passed; `Scripts/test-runtime.sh` passed with no real HAL entry points in its fake service; all 9 Ableton name-sync tests passed. The expanded runtime run exposed a stale-status race in its watchdog assertion; the test now waits for the new process image as well as a running status, and the full rerun passed.

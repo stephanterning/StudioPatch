@@ -65,7 +65,7 @@ Each preset exposes a distinct device UID, named `StudioPatch (<preset name>)`. 
 
 **Save current as new** asks whether to copy labels, create without labels, or cancel. Only names that differ from their current automatic names are copied. An equal-text manual label becomes automatic in the new preset. Copying is a one-time transfer; later edits are independent. If copying fails, the new preset remains saved and StudioPatch offers retry or discard of the remaining transfer. Keep the panel open until the transfer finishes.
 
-Older app-owned labels are migrated when their preset is activated. Original files are backed up with a `.before-core-audio-labels` suffix; labels not mapped to currently exposed virtual channels remain in those backups. Existing different Core Audio names take precedence. Import/export is not included.
+Manual labels are stored only in Core Audio. Older app-owned labels are no longer loaded or migrated. Import/export is not included.
 
 ### Copy macOS channel names to Ableton Live
 

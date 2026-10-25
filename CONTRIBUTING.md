@@ -61,7 +61,7 @@ These invariants are easy to break by accident. Please keep them in mind when re
 - **Report latency honestly.** Do not lower reported values to make numbers look better.
 - **The panel is the only writer of `last-session.json`.** The service only reads it.
 - **Driver, broker and service must match.** They share the memory layout in `Sources/SharedTransport.hpp`. If you change it, change `SharedTransport::Magic` so mismatched components refuse to connect, and note in the pull request that all three must be reinstalled together.
-- **Old configurations must still load.** Keep obsolete fields in `Preset` decodable.
+- **Backward compatibility is not required.** Remove obsolete migration paths and fields when they are no longer needed.
 - **Never fall back to ad hoc signing.** Permissions and broker authentication depend on a stable certificate.
 - **Never change the user's default devices or their own aggregate devices.**
 
