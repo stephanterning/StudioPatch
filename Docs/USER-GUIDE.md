@@ -92,6 +92,7 @@ From the repository directory:
 ```sh
 bash Scripts/sync-ableton-channel-names.sh --dry-run   # Preview only (also the default)
 bash Scripts/sync-ableton-channel-names.sh --apply     # Back up and write while Live is closed
+bash Scripts/sync-ableton-channel-names.sh --apply --enable-all # Also enable all mono/stereo inputs and outputs
 bash Scripts/sync-ableton-channel-names.sh --watch     # Automatic sync every 10 seconds
 bash Scripts/sync-ableton-channel-names.sh --list      # macOS device UIDs and channel names
 bash Scripts/sync-ableton-channel-names.sh --restore "/path/to/backup.cfg"
@@ -111,13 +112,16 @@ stereo name: `Analog 7` / `Analog 8` becomes `Analog 7/8`, and
 `UFX III · MADI 9` / `UFX III · MADI 10` becomes `UFX III · MADI 9/10`.
 Other pairs keep their Core Audio mono names and combine the names with ` / `
 for stereo, or use one name when identical. A missing driver name uses the channel
-number. Enabled/disabled channels, routing, buffer sizes, sample rates, dormant
+number. Channel activation is preserved by default. Add `--enable-all` to enable all mono
+and stereo inputs and outputs for the target device (by default, the active
+StudioPatch preset). It also works with `--dry-run` and `--watch`; it cannot be
+combined with `--restore` or `--list`. Routing, buffer sizes, sample rates, dormant
 channel labels and other devices are not modified.
 
 **File-format limitation:** Ableton does not document this binary format. The
 adapter checks the embedded schemas and device/channel layout, edits only the
-UTF-16 label spans, then reparses the result and proves that reversing those
-string edits reproduces the original file byte for byte. An unsupported schema,
+UTF-16 label spans and, with `--enable-all`, the existing channel activation bytes, then reparses the result and proves that reversing those
+edits reproduces the original file byte for byte. An unsupported schema,
 odd channel count, missing device or changed channel count stops the write. If
 channel counts changed, select the device in Live and quit once so Live can save
 its new layout, then sync again.
@@ -131,8 +135,9 @@ backup, preserving subsequent changes to other settings; it makes another backup
 first. Specify `--device-uid` for restoration; it requires the same saved channel counts. Stop the watcher before restoring,
 or it will copy the Core Audio names back on its next pass.
 
-Validation: nine focused tests cover L/R and numbered pair naming, Unicode, sparse list IDs, dormant labels,
+Validation: ten focused tests cover L/R and numbered pair naming, Unicode, sparse list IDs, dormant labels,
 other-device preservation, exact restore, idempotence, format rejection, backups,
+opt-in activation of all mono/stereo inputs and outputs,
 refusal to overwrite a concurrent save or write after Live starts, and discovery of the active preset UID. A copy of
 real Live 12.4.7 preferences parsed 101 devices and updated 129 StudioPatch mono
 and stereo labels; restoring reproduced the original bytes exactly.

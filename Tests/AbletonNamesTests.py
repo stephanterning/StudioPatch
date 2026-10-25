@@ -64,6 +64,34 @@ class PreferencesTests(unittest.TestCase):
         restored, _ = prefs.patch(output, "target", restore=original)
         self.assertEqual(restored, original)
 
+    def test_enable_all_is_opt_in_and_changes_only_target_activators(self):
+        original = fixture()
+        labels_only, _ = prefs.patch(original, "target", names=NAMES)
+        before = prefs.parse(original)
+        normal = prefs.parse(labels_only)
+        for direction in ("inputs", "outputs"):
+            for kind in ("mono", "stereo"):
+                self.assertEqual(getattr(getattr(before["target"], direction), kind),
+                                 getattr(getattr(normal["target"], direction), kind))
+        enabled, changes = prefs.patch(labels_only, "target", names=NAMES, enable_all=True)
+        after = prefs.parse(enabled)
+        self.assertEqual(len(changes), 4)
+        expected = bytearray(labels_only)
+        for direction in ("inputs", "outputs"):
+            channels = getattr(normal["target"], direction)
+            for kind in ("mono", "stereo"):
+                self.assertEqual(getattr(getattr(after["target"], direction), kind), b"\1\1")
+                start = getattr(channels, kind + "_start")
+                expected[start:start+2] = b"\1\1"
+        self.assertEqual(enabled, bytes(expected))  # All other bytes, including other devices, unchanged.
+        self.assertEqual(prefs.patch(enabled, "target", names=NAMES, enable_all=True), (enabled, []))
+        combined, _ = prefs.patch(original, "target", names=NAMES, enable_all=True)
+        self.assertEqual(combined, enabled)
+        restored, _ = prefs.patch(enabled, "target", restore=original)
+        self.assertEqual(prefs.parse(restored)["target"].inputs.mono, b"\1\1")
+        with self.assertRaises(prefs.FormatError):
+            prefs.patch(enabled, "target", restore=original, enable_all=True)
+
     def test_restore_preserves_later_unrelated_edits(self):
         original = fixture()
         output, _ = prefs.patch(original, "target", names=NAMES)
@@ -156,10 +184,14 @@ class PreferencesTests(unittest.TestCase):
                 original = fixture().replace(prefs.encode_string("target"), prefs.encode_string(uid))
                 path.write_bytes(original)
                 args = SimpleNamespace(helper=Path("unused"), watch=None, preferences=path,
-                                       device_uid=None, restore=None, apply=False)
+                                       device_uid=None, restore=None, apply=False, enable_all=False)
                 snapshot = {"liveRunning": False, "devices": [dict(NAMES, uid=uid)]}
                 with mock.object(sync, "helper_json", side_effect=[False, snapshot]), contextlib.redirect_stdout(io.StringIO()):
                     self.assertIn("Preview: 12 labels", sync.sync(args))
+                self.assertEqual(path.read_bytes(), original)
+                args.enable_all = True
+                with mock.object(sync, "helper_json", side_effect=[False, snapshot]), contextlib.redirect_stdout(io.StringIO()):
+                    self.assertIn("Preview: 16 label/activation settings", sync.sync(args))
                 self.assertEqual(path.read_bytes(), original)
                 snapshot["devices"].append(dict(NAMES, uid="se.studiopatch.preset.other"))
                 with mock.object(sync, "helper_json", side_effect=[False, snapshot]):

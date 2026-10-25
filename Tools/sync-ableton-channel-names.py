@@ -110,16 +110,17 @@ def sync(args):
         if len(matches) != 1:
             raise FormatError(f"Expected one active StudioPatch device or explicit UID {device_uid!r}; found {len(matches)}")
         device_uid = matches[0]["uid"]
-        after, changes = patch(before, device_uid, names=matches[0])
+        after, changes = patch(before, device_uid, names=matches[0], enable_all=args.enable_all)
+    noun = "label/activation settings" if args.enable_all else "labels"
     if not changes:
-        return "Channel names are already up to date."
+        return "Channel names and requested activation settings are already up to date."
     if not args.apply:
         print(f"Preferences: {path}\nDevice UID: {device_uid}")
         for direction, label, old, new in changes:
             print(f"  {direction} {label}: {old!r} → {new!r}")
-        return f"Preview: {len(changes)} labels would change. Use --apply to save."
+        return f"Preview: {len(changes)} {noun} would change. Use --apply to save."
     backup = atomic_update(path, before, after, STATE, lambda: not helper_json(args.helper, "--running"))
-    return f"Updated {len(changes)} labels. Live will read them on its next start.\nBackup: {backup}"
+    return f"Updated {len(changes)} {noun}. Live will read them on its next start.\nBackup: {backup}"
 
 
 def arguments():
@@ -130,11 +131,14 @@ def arguments():
     mode.add_argument("--dry-run", action="store_true", help="Preview without writing (default)")
     mode.add_argument("--list", action="store_true", help="List macOS devices and their UIDs/names")
     mode.add_argument("--restore", type=Path, help="Restore this device's labels from a .cfg backup, preserving other settings")
+    parser.add_argument("--enable-all", action="store_true", help="Also enable all mono and stereo inputs/outputs for the target device; default preserves activation")
     parser.add_argument("--device-uid", help="Device UID to update (default: active StudioPatch preset)")
     parser.add_argument("--preferences", type=Path, help="Explicit Preferences.cfg; otherwise use installed Live's version")
     parser.add_argument("--live-app", type=Path, default=Path("/Applications/Ableton Live 12 Suite.app"))
     parser.add_argument("--watch", type=float, nargs="?", const=10, help="Sync automatically every N seconds while Live is closed (default 10); Ctrl-C stops")
     args = parser.parse_args()
+    if args.enable_all and (args.restore or args.list):
+        parser.error("--enable-all cannot be combined with --restore or --list")
     if args.watch is not None:
         if args.list or args.dry_run or args.restore or not 5 <= args.watch <= 3600:
             parser.error("--watch requires normal sync and an interval of 5–3600 seconds")

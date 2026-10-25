@@ -1,7 +1,7 @@
 """Conservative, surgical label edits for Live's macOS Preferences.cfg.
 
 The format is undocumented. Read the embedded schema, recognize one contiguous
-CoreAudioDevice list, and replace only existing UTF-16 string spans. Never
+CoreAudioDevice list, and replace existing UTF-16 string spans and optionally channel activator bytes. Never
 reserialize the rest of the file or invent device/channel/list entries.
 """
 from dataclasses import dataclass
@@ -89,6 +89,8 @@ class Channels:
     stereo: bytes
     next_id: int
     rows: list
+    mono_start: int
+    stereo_start: int
 
 
 @dataclass
@@ -104,7 +106,10 @@ class Device:
 def read_channels(reader):
     count = reader.integer()
     require(count <= 4096, "Unexpected physical channel count")
-    mono, stereo = reader.flags(), reader.flags()
+    mono_start = reader.pos + 4
+    mono = reader.flags()
+    stereo_start = reader.pos + 4
+    stereo = reader.flags()
     next_id = reader.integer()
     rows, ids = [], set()
     while True:
@@ -117,7 +122,7 @@ def read_channels(reader):
         ids.add(index)
         rows.append((index, [reader.string() for _ in range(3)]))
         require(len(rows) <= 4096, "Too many channel-name rows")
-    return Channels(count, mono, stereo, next_id, rows)
+    return Channels(count, mono, stereo, next_id, rows, mono_start, stereo_start)
 
 
 def read_schema(reader):
@@ -197,7 +202,8 @@ def pair_labels(left, right):
     return [left, right, left if left == right else f"{left} / {right}"]
 
 
-def patch(data, uid, names=None, restore=None):
+def patch(data, uid, names=None, restore=None, enable_all=False):
+    require(not (enable_all and restore is not None), "Cannot combine enable-all with label restoration")
     devices = parse(data)
     require(uid in devices, f"Device UID {uid!r} is not saved in Live")
     device = devices[uid]
@@ -219,6 +225,14 @@ def patch(data, uid, names=None, restore=None):
             rows = active_rows(channels, len(values))
             desired = [pair_labels(left, right)
                        for left, right in zip(values[::2], values[1::2])]
+        if enable_all:
+            for kind in ("mono", "stereo"):
+                flags = getattr(channels, kind)
+                start = getattr(channels, kind + "_start")
+                for pair, flag in enumerate(flags):
+                    if not flag:
+                        edits.append((start + pair, start + pair + 1, b"\1"))
+                        changes.append((direction, f"{kind} {2*pair+1}/{2*pair+2} enabled", False, True))
         for pair, ((_, spans), target) in enumerate(zip(rows, desired)):
             for label, span, value in zip((f"mono {2*pair+1}", f"mono {2*pair+2}", f"stereo {2*pair+1}/{2*pair+2}"), spans, target):
                 if span.value != value:
@@ -233,8 +247,13 @@ def patch(data, uid, names=None, restore=None):
     inverse = []
     for direction in ("inputs", "outputs"):
         before, after = getattr(device, direction), getattr(reparsed, direction)
-        require((before.count, before.mono, before.stereo, before.next_id) ==
-                (after.count, after.mono, after.stereo, after.next_id), "Non-label channel data changed")
+        require((before.count, before.next_id) == (after.count, after.next_id), "Channel layout changed")
+        for kind in ("mono", "stereo"):
+            old_flags, new_flags = getattr(before, kind), getattr(after, kind)
+            expected = b"\1" * len(old_flags) if enable_all else old_flags
+            require(new_flags == expected, "Unexpected channel activation change")
+            start = getattr(after, kind + "_start")
+            inverse.append((start, start + len(new_flags), old_flags))
         require(len(before.rows) == len(after.rows), "Channel list changed")
         for (old_id, old_spans), (new_id, new_spans) in zip(before.rows, after.rows):
             require(old_id == new_id, "Channel IDs changed")
@@ -242,5 +261,5 @@ def patch(data, uid, names=None, restore=None):
     recovered = output
     for start, end, value in sorted(inverse, reverse=True):
         recovered = recovered[:start] + value + recovered[end:]
-    require(recovered == data, "Changes escaped the channel-name fields")
+    require(recovered == data, "Changes escaped the permitted channel fields")
     return output, changes
