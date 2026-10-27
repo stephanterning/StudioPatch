@@ -4,7 +4,7 @@
 #include <string>
 #include <sstream>
 #include <chrono>
-static bool running=false,available=false;
+static bool running=false,available=false,driftActive=false,driftFailed=false;
 static std::chrono::steady_clock::time_point startedAt;
 static std::string deviceName="StudioPatch",deviceUID="se.studiopatch.device.v1";
 static std::string config="1 2 2 96000 256";
@@ -63,15 +63,15 @@ char* SPSetHardwareRate(const char* raw){
  if(flag("fail"))return reply("{\"error\":\"Simulated failure\"}");
  if(flag("rate-error"))return reply(R"({"error":"Simulated rate control failure"})");
  // master-rate-unreadable: the Sync Source rate cannot be read, so nothing is written.
- if(flag("master-rate-unreadable"))return reply(R"({"warnings":["The Sync Source rate could not be read."]})");
+ if(flag("master-rate-unreadable"))return reply(R"({"warnings":[{ "message":"The Sync Source rate could not be read." }]})");
  std::string json(raw),warnings;auto pos=json.find("\"sampleRate\":");
  double target=pos!=std::string::npos?std::stod(json.substr(pos+13)):hardwareRate;
  double before=hardwareRate;
  auto written=[&](){return std::string(",\"wroteSyncSource\":")+(before!=hardwareRate?"true":"false");};
- if(flag("write-then-unreadable")){hardwareRate=target;std::remove((root()+"/write-then-unreadable").c_str());return reply(std::string(R"({"warnings":["Rate write succeeded but readback failed"])" )+written()+"}");}
- if(flag("master-refuses") || (flag("restore-refuses") && target==96000))warnings=R"("Test master rejected the rate.")";else hardwareRate=target;
+ if(flag("write-then-unreadable")){hardwareRate=target;std::remove((root()+"/write-then-unreadable").c_str());return reply(std::string(R"({"warnings":[{ "message":"Rate write succeeded but readback failed" }])" )+written()+"}");}
+ if(flag("master-refuses") || (flag("restore-refuses") && target==96000))warnings=R"({"message":"Test master rejected the rate."})";else hardwareRate=target;
  if(json.find(R"("syncLocked":true,"uid":"secondary")")!=std::string::npos) {
-  if(flag("locked-refuses"))warnings+=std::string(warnings.empty()?"":",")+R"("Test secondary does not support the rate.")";
+  if(flag("locked-refuses"))warnings+=std::string(warnings.empty()?"":",")+R"({"message":"Test secondary does not support the rate.","compensatedUID":"secondary"})";
   else secondaryRate=hardwareRate;
  }
  std::ofstream(root()+"/hardware-rate")<<hardwareRate;
@@ -107,16 +107,21 @@ char* SPConfigure(const char* raw){event("configure");std::string json(raw);
  return reply("{\"ok\":true}");
 }
 char* SPStart(const char* raw){
+ bool driftRequested=std::string(raw).find("\"drift\":true")!=std::string::npos;
+ driftFailed=driftRequested && flag("compensation-start-fail");driftActive=driftRequested && !driftFailed;
  std::string rejected;std::ifstream(root()+"/start-reject")>>rejected;
  if(!rejected.empty() && std::string(raw).find("\"outputCount\":"+rejected+",")!=std::string::npos)return reply(R"({"error":"Simulated new graph start failure"})");
  std::ofstream(root()+"/started.json")<<raw;if(flag("start-fail"))return reply(R"({"error":"Simulated start failure"})");std::remove((root()+"/stale-hardware").c_str());event("start");startedAt=std::chrono::steady_clock::now();running=true;return reply("{\"ok\":true}");}
 char* SPUpdateRouting(const char*){event("route");return reply(running?"{\"applied\":true}":"{\"applied\":false}");}
-void SPStop(){if(running)event("stop");running=false;}
+void SPStop(){if(running)event("stop");running=false;driftActive=false;driftFailed=false;}
 char* SPPublishLatency(){return reply("{\"ok\":true}");}
 char* SPStatus(){
+ if(flag("status-fail"))return reply(R"({"error":"Simulated status read failure"})");
+ std::string compensated=driftActive?R"(["secondary"])":"[]";
+ std::string warnings=driftFailed?R"(["Test secondary was not started (simulated aggregate start failure)."])":"[]";
  std::string diagnostics="{}";double skew=0;std::ifstream skewFile(root()+"/clock-skew");
  if(skewFile>>skew)diagnostics=R"({\"devices\":[{\"deviceID\":2,\"master\":false,\"clockSkewFrames\":)"+std::to_string(skew)+R"(,\"peakClockSkewFrames\":)"+std::to_string(skew)+R"(}]})";
- return reply(std::string("{\"running\":")+(running?"true":"false")+",\"stale\":"+(flag("stale-hardware")?"true":"false")+",\"warnings\":[],\"cycles\":1,\"badBuffers\":0,\"bufferFrames\":64,\"latencyDiagnostics\":\""+diagnostics+"\"}");
+ return reply(std::string("{\"running\":")+(running?"true":"false")+",\"stale\":"+(flag("stale-hardware")?"true":"false")+",\"driftCompensatedUIDs\":"+compensated+",\"warnings\":"+warnings+",\"cycles\":1,\"badBuffers\":0,\"bufferFrames\":64,\"latencyDiagnostics\":\""+diagnostics+"\"}");
 }
 char* SPSetChannelNames(const char* raw){
  if(flag("names-fail"))return reply(R"({"error":"Simulated channel-name write failure"})");

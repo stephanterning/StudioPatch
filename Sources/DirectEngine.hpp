@@ -9,7 +9,7 @@ public:
     struct DeviceIO {
         DirectEngine* owner=nullptr;AudioDeviceID id=0,physical=0;AudioDeviceIOProcID proc=nullptr;
         std::string uid;
-        bool master=false,aggregate=false,aligned=false;double offset=0;
+        bool master=false,aggregate=false,aligned=false,started=false;double offset=0;
         patch::ClockReader clockReader;
         patch::ClockSample previousClock{};
         uint32_t previousFrames=0;uint64_t alignedEpoch=0;double previousSample=-INFINITY;
@@ -362,6 +362,7 @@ public:
         for(auto& d:devices) {
             auto status=AudioDeviceCreateIOProcID(d->id,io,d.get(),&d->proc);
             if(!status)status=AudioDeviceStart(d->id,d->proc);
+            d->started=status==noErr; // Status only; never gates or changes audio.
             if(status && d->master)check(status,"Start direct hardware audio");
             if(status)deviceWarnings.push_back(deviceName(@(d->uid.c_str()))+" was not started (Core Audio "+std::to_string(status)+").");
         }

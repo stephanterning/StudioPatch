@@ -14,10 +14,23 @@ import CoreAudio
     let sessionStore=SessionStore()
     var appliedRuntime="",desiredRuntime="",driverConfiguration=""
     var runtimeLatencyDiagnostics:String?,publishedNames:String?
+    // Presentation only: neither field participates in configuration decisions.
+    var engineStatus:EngineStatus?, operationWarning=false
+    var health:RuntimeHealth {
+        guard running else { return preset.devices.isEmpty ? .idle : .error }
+        let engineProblem=engineStatus.map { !$0.warnings.isEmpty || $0.badBuffers>0 } ?? true
+        return operationWarning || engineProblem || !notes.isEmpty || !rateWarnings.isEmpty || !rejection.isEmpty || syncProblem != nil ? .warning : .healthy
+    }
     var lastDesiredRate=0,pendingPanelRate:Int?
     var nextRuntimeAttempt=Date.distantPast,runtimeRetry=RateRetrySchedule()
     var waitingForHardware=false
-    var rateWarnings:[String]=[], notices=Set<String>()
+    var hardwareRateWarnings:[HardwareRateWarning]=[], notices=Set<String>()
+    var rateWarnings:[String] {
+        hardwareRateWarnings.filter { warning in
+            guard let uid=warning.compensatedUID else { return true }
+            return !(engineStatus?.driftCompensatedUIDs.contains(uid) ?? false)
+        }.map(\.message)
+    }
     var handledRequest=0.0, rejectedRuntime="", rejection=""
     struct PendingConfiguration {
         var raw:String; var request:Double; var panelRate:Int?; var deviceName:String
@@ -114,7 +127,7 @@ import CoreAudio
         "\(preset.sampleRate) Hz · \(preset.inputCount) To Computer · \(preset.outputCount) From Computer (\(selected.map(\.name).joined(separator:", ")))"
     }
     func stopEngine() async {
-        await AudioWorker.stop(); running=false; appliedRuntime=""; runtimeLatencyDiagnostics=nil
+        await AudioWorker.stop(); running=false; appliedRuntime=""; runtimeLatencyDiagnostics=nil; engineStatus=nil
     }
     func loadDesired() throws {
         guard let desired=try sessionStore.load() else { return }
@@ -160,7 +173,12 @@ import CoreAudio
         Task { [self] in
             defer {
                 ioBusy=false
-                RuntimeConnection.write(RuntimeSnapshot(devices:devices,installed:installed,running:running,
+                let currentHealth=health
+                if currentHealth == .healthy {
+                    RuntimeConnection.clearProblemNotifications()
+                    notices.removeAll() // A later recurrence may notify again.
+                }
+                RuntimeConnection.write(RuntimeSnapshot(devices:devices,installed:installed,running:running,health:currentHealth,
                     message:([message]+notes).joined(separator:" · "),rate:effectiveRate,latencyDiagnostics:runtimeLatencyDiagnostics))
                 // One short burst per accepted transaction / started engine.
                 // Expiry only reduces polling to the ordinary heartbeat; it
@@ -215,6 +233,7 @@ import CoreAudio
             var status:EngineStatus?
             do {
                 status=try JSONDecoder().decode(EngineStatus.self,from:try await AudioWorker.call { SPStatus() })
+                engineStatus=status
                 runtimeLatencyDiagnostics=status?.running == true ? status?.latencyDiagnostics : nil
                 if status?.running == false { running=false; appliedRuntime="" }
             } catch { notes.append("Engine status unavailable: \(error.localizedDescription)") }
@@ -232,6 +251,7 @@ import CoreAudio
             if running && !stale && request == 0 && ((raw == appliedRuntime && !hardwareRateChanged) || raw == rejectedRuntime) {
                 await maintain()
                 if let status {
+                    operationWarning=false
                     let problems=[syncProblem,rejection].compactMap { $0?.isEmpty == false ? $0 : nil }
                     message=(["Routing active · \(status.bufferFrames) samples I/O · \(status.badBuffers) buffer errors"]+status.warnings+rateWarnings+problems).joined(separator:" · ")
                 }
@@ -244,6 +264,7 @@ import CoreAudio
                     if (try JSONSerialization.jsonObject(with:result) as? [String:Any])?["applied"] as? Bool == true {
                         appliedRuntime=raw
                         await maintain()
+                        operationWarning=false
                         message="Routing updated · audio remains active"
                         return
                     }
@@ -265,20 +286,24 @@ import CoreAudio
         catch { notes.append("Channel names were not updated: \(error.localizedDescription)") }
         do { _ = try await AudioWorker.call { SPPublishLatency() } }
         catch { notes.append("Latency report was not updated: \(error.localizedDescription)") }
-        let problem=syncProblem
-        notices=notices.filter { !$0.hasPrefix("sync:") || $0 == "sync:"+(problem ?? "") }
-        if let problem { notifyOnce("sync:"+problem,"sync-mismatch",title:"sample rate not in sync",body:problem) }
+        reportSyncProblem()
         guard !published else { return }
         do { try await setDeviceAvailable(true) }
         catch { notes.append("StudioPatch device not yet published: \(error.localizedDescription)") }
     }
-    // Sync lock follows the Sync Source when StudioPatch changes the rate. A
-    // locked interface changed elsewhere is reported, never set back while running.
+    func reportSyncProblem() {
+        let problem=syncProblem
+        notices=notices.filter { !$0.hasPrefix("sync:") || $0 == "sync:"+(problem ?? "") }
+        if let problem { notifyOnce("sync:"+problem,"sync-mismatch",title:"sample rate not in sync",body:problem) }
+    }
+    // A running resampled path handles a rate difference. The preset checkbox
+    // and sync lock are not evidence that the compensated path actually started.
     var syncProblem: String? {
         let active=effective
         guard let source=hardware.first(where:{$0.uid==active.masterUID})?.sampleRate, source>0 else { return nil }
         let outOfSync=hardware.filter { member in
-            member.uid != active.masterUID && active.devices.contains(where: { $0.uid == member.uid }) && active.isSyncLocked(member.uid) &&
+            member.uid != active.masterUID && active.devices.contains(where: { $0.uid == member.uid }) &&
+                !(engineStatus?.driftCompensatedUIDs.contains(member.uid) ?? false) &&
                 member.sampleRate>0 && abs(member.sampleRate-source)>0.5
         }
         guard !outOfSync.isEmpty else { return nil }
@@ -293,6 +318,7 @@ import CoreAudio
         (try? JSONSerialization.jsonObject(with:Data(raw.utf8)) as? [String:Any])?["sampleRate"] as? Int
     }
     func deferChange(_ reason:String) {
+        operationWarning=true
         message=pendingConfiguration == nil
             ? "Requested change not yet applied: \(reason) The current configuration remains active."
             : "Configuration confirmation failed: \(reason) The hardware engine is still running; audio through the new session is not yet confirmed."
@@ -301,6 +327,7 @@ import CoreAudio
     }
     // The Sync Source did not reach the requested rate. StudioPatch keeps the rate it runs at.
     func refuseRate(_ wanted:Int,staying:Int,request:Double,reason:String) async {
+        operationWarning=true
         pendingPanelRate=nil
         if request>0 { await acknowledge(request) }
         let text="The Sync Source could not change to \(wanted) Hz; StudioPatch stays at \(staying) Hz."
@@ -322,7 +349,7 @@ import CoreAudio
                 _ = try await AudioWorker.call { raw.withCString { SPPrepareChange($0) } }
             }
             let rates=try JSONSerialization.jsonObject(with:try await AudioWorker.call { raw.withCString { SPSetHardwareRate($0) } }) as? [String:Any] ?? [:]
-            rateWarnings=rates["warnings"] as? [String] ?? []
+            hardwareRateWarnings=(rates["warnings"] as? [[String:Any]] ?? []).compactMap(HardwareRateWarning.init)
             if sameSource && rates["wroteSyncSource"] as? Bool == true { ownSyncWrite=wanted }
             guard let confirmed=(rates["rate"] as? Double).map({Int($0.rounded())}), confirmed>0 else {
                 let reason=(["The Sync Source rate could not be confirmed."]+rateWarnings).joined(separator:" ")
@@ -341,7 +368,7 @@ import CoreAudio
             ownSyncWrite=nil
             pendingPanelRate=nil
             if request>0 { await acknowledge(request) }
-            if actual == wanted { message=(["Routing remains active at \(effectiveRate) Hz"]+rateWarnings).joined(separator:" · ") }
+            if actual == wanted { operationWarning=false; message=(["Routing remains active at \(effectiveRate) Hz"]+rateWarnings).joined(separator:" · ") }
             return
         }
         try await applyConfiguration(PendingConfiguration(raw:raw,request:request,panelRate:pendingPanelRate,deviceName:preset.deviceName,
@@ -360,6 +387,7 @@ import CoreAudio
         }
         guard configuration["ok"] as? Bool == true else {
             pollConfiguration=true
+            operationWarning=false
             message="Waiting for Core Audio to finish the configuration; audio through the new session is not yet confirmed."
             return
         }
@@ -377,6 +405,8 @@ import CoreAudio
         catch { notes.append("Device inventory failed: \(error.localizedDescription)") }
         _ = try await AudioWorker.call { raw.withCString { SPStart($0) } }
         appliedRuntime=raw; desiredRuntime=raw; activeDeviceName=change.deviceName; running=true
+        do { engineStatus=try JSONDecoder().decode(EngineStatus.self,from:try await AudioWorker.call { SPStatus() }) }
+        catch { notes.append("Engine status unavailable: \(error.localizedDescription)") }
         publicationFollowUntil=ProcessInfo.processInfo.systemUptime+1
         do { try await publishChannelNames(force:true) }
         catch { notes.append("Channel names were not updated: \(error.localizedDescription)") }
@@ -385,7 +415,9 @@ import CoreAudio
         if change.request>0 { await acknowledge(change.request) }
         do { try await setDeviceAvailable(true) }
         catch { notes.append("StudioPatch device not yet published: \(error.localizedDescription)") }
-        message=(["Routing active · \(effective.bufferFrames) samples I/O · \(effectiveRate) Hz"]+rateWarnings).joined(separator:" · ")
+        reportSyncProblem()
+        operationWarning=false
+        message=(["Routing active · \(effective.bufferFrames) samples I/O · \(effectiveRate) Hz"]+(engineStatus?.warnings ?? [])+rateWarnings+[syncProblem].compactMap { $0 }).joined(separator:" · ")
     }
     // HAL refused the change before commit, so the old engine never stopped.
     // Undo only our own Sync Source write from this attempt, once.
@@ -397,7 +429,7 @@ import CoreAudio
             let result=data.flatMap { try? JSONSerialization.jsonObject(with:$0) as? [String:Any] }
             if let rate=result?["rate"] as? Double, Int(rate.rounded())==effectiveRate { parts.append("Hardware restored to \(effectiveRate) Hz.") }
             else { parts.append("The hardware rate could not be restored to \(effectiveRate) Hz.") }
-            rateWarnings+=result?["warnings"] as? [String] ?? []
+            hardwareRateWarnings+=(result?["warnings"] as? [[String:Any]] ?? []).compactMap(HardwareRateWarning.init)
             inventoryDirty=true
         }
         ownSyncWrite=nil

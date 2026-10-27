@@ -1,5 +1,22 @@
 # Project status
 
+## Resolved problem notifications — 2026-10-27
+
+Installed at the owner's request on 2026-10-27. Healthy (green) runtime status removes StudioPatch's earlier problem notifications from Notification Center and cancels pending ones. Other statuses retain them. A later recurrence may notify again. Cleanup is limited to known StudioPatch problem identifiers, including notifications from an earlier service process; audio control is unchanged. Live macOS Notification Center removal still needs visual verification.
+
+Verification: 10/10 CTest suites and 46 runtime checks passed (45 scenarios plus HAL-import isolation). The fake notification store verifies cleanup after recovery and enabling drift correction, retention during warnings/unknown status, a fresh notification on recurrence, cleanup of previous-process identifiers and preservation of unrelated identifiers. Production panel and service linked successfully into `build/notification-cleanup-StudioPatch` and `build/notification-cleanup-StudioPatchService`; neither was installed or launched.
+
+Deployment: the verified binaries were signed with the existing certificate, checked against the installed broker requirement, and installed in `Dist/StudioPatch.app`. Previous app and settings are backed up under `build/notification-update.6pzl14nz/`. Service PID 5525 and panel PID 5549 are running; fresh status is healthy at 96 kHz, 32 samples I/O, zero buffer errors. Driver and broker hashes are unchanged; broker PID 579, Core Audio PID 613 and driver host PID 662 were not restarted. The initial panel open returned macOS error -609; a subsequent open succeeded.
+
+## Status presentation follow-up — installed 2026-10-27
+
+The panel now distinguishes healthy running (green), running with warnings (orange), configured audio off/error (red), and no selected interfaces (gray). Sample-rate differences are reported regardless of sync lock, but omitted for successfully started drift-compensated secondary paths. A failed secondary aggregate remains a warning. Presentation does not stop audio, change rates, add retries, or alter the shared-memory protocol. The panel and service must be updated together; no driver or broker update is required for this change. Real UFX III/ZED-R16 compensation behavior remains unverified.
+
+Verification: 10/10 CTest suites and 44 runtime scenarios plus the HAL-import isolation check passed (45 checks total). The added cases cover uncompensated and compensated mismatch, failed secondary compensation startup, unknown status, failed applied configuration, idle selection and warning persistence between retries. Native bridge tests check that only started aggregate paths are reported as compensated. The final panel and service linked into `build/status-colors-StudioPatch` and `build/status-colors-StudioPatchService`; neither was launched or installed.
+
+Deployment: the owner then authorized updating the panel and service. Their signed app bundle was installed in `Dist/StudioPatch.app`, verified against the existing broker requirement, and the panel/service restarted. The previous bundle and settings were saved under `build/status-update.qdfww1vb/`. Driver and broker hashes were unchanged; broker PID 579 and driver process PID 662 remained running. The new service reported `healthy`, routing active at 96 kHz, 32 samples I/O and zero buffer errors; UFX III and ZED-R16 both reported 96 kHz after startup. Drift-compensation audio quality and live warning transitions still require the planned hardware tests.
+
+
 ## Simplify configuration failure handling — 2026-10-27
 
 Implemented in source; **not installed**. One planned simplification round on top of `f827958`, following explicit owner decisions instead of further point fixes. See the [implementation hand-over](history/AUDIO-CHANGE-IMPLEMENTATION-2026-10-27.md#simplification-round).

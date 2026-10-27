@@ -112,6 +112,21 @@ int main() { @autoreleasepool {
         assert(allowed==0 || !e.lastReport.empty()); // the publication itself succeeded
     }
 
+    // Status suppresses rate warnings only for an aggregate whose I/O started.
+    // No real aggregate or I/O is created by this fixture.
+    engine=std::make_unique<DirectEngine>();engine->memory=mapping;
+    auto secondary=std::make_unique<DirectEngine::DeviceIO>();secondary->uid="secondary";
+    secondary->id=20;secondary->physical=20;secondary->aggregate=true;
+    engine->devices.push_back(std::move(secondary));
+    auto readStatus=[] { char* raw=SPStatus();NSDictionary* value=json(raw);free(raw);return value; };
+    assert([readStatus()[@"driftCompensatedUIDs"] count]==0);
+    engine->devices[0]->started=true;
+    assert([readStatus()[@"driftCompensatedUIDs"] isEqual:@[@"secondary"]]);
+    engine->devices[0]->started=false;engine->deviceWarnings.push_back("secondary failed to start");
+    assert([readStatus()[@"driftCompensatedUIDs"] count]==0 && [readStatus()[@"warnings"] count]==1);
+    engine->devices[0]->aggregate=false; // There is no real aggregate to destroy.
+    engine.reset();
+
     // A successful write followed by failed readback remains unknown, with no
     // steering of the secondary based on the requested value.
     failAfterRateWrite=true;rateWrites=0;result=setHardwareRate(lower);

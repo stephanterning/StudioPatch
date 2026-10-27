@@ -29,6 +29,15 @@ import CoreAudio
         }
     }
     @Published var running = false
+    @Published var health:RuntimeHealth = .idle
+    var statusColor:Color {
+        switch health {
+        case .healthy: return .green
+        case .warning: return .orange
+        case .error: return .red
+        case .idle: return .gray
+        }
+    }
     @Published var message = "Audio latency has not been measured yet"
     @Published var error = ""
     @Published var tab = 0
@@ -493,18 +502,19 @@ import CoreAudio
     private func readRuntime() {
         let snapshot:RuntimeSnapshot
         // A stale or missing snapshot means audio status is unknown, not running.
-        do { snapshot=try RuntimeConnection.read() } catch { running=false; message=error.localizedDescription; return }
+        do { snapshot=try RuntimeConnection.read() } catch { running=false; health = .error; message=error.localizedDescription; return }
         do {
             let previousDevices=preset.knownDevices
             loadingRuntime=true
             updateInventory(snapshot.devices)
             installed=snapshot.installed; inventoryKnown=true; running=snapshot.running
+            health=snapshot.health
             message=snapshot.message
             runtimeLatencyDiagnostics=snapshot.latencyDiagnostics
             if virtualDevice != nil, (8000...384000).contains(snapshot.rate) { preset.sampleRate=snapshot.rate }
             loadingRuntime=false
             if previousDevices != preset.knownDevices { try sessionStore.save(preset) }
-        } catch { message=error.localizedDescription }
+        } catch { health = running ? .warning : .error; message=error.localizedDescription }
     }
     private var libraryStore: PresetLibraryStore {
         PresetLibraryStore(url:sessionStore.url.deletingLastPathComponent().appendingPathComponent("presets.json"))
@@ -600,7 +610,8 @@ struct ContentView: View {
                 HStack(spacing:18) {
                     Text("StudioPatch").font(.system(size:28,weight:.semibold)).fixedSize()
                     HStack(spacing:8) {
-                        Circle().fill(m.running ? Color.green : Color.gray).frame(width:7,height:7)
+                        Circle().fill(m.statusColor).frame(width:7,height:7)
+                            .accessibilityLabel("Audio status: \(m.health.rawValue)")
                         Text(m.message).font(.caption).monospacedDigit().foregroundStyle(.secondary).lineLimit(2).help(m.message)
                         if !m.running && m.liveRuntime {
                             Button("Restart audio service",action:m.restartService).controlSize(.small)

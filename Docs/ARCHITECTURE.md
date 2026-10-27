@@ -46,7 +46,7 @@ StudioPatch.app ◄──reads─── runtime-status.json ◄──writes─�
 3. The service compares the desired configuration with what is running:
    - **Routing-only change:** new immutable routing tables are swapped in at a block boundary. Audio keeps running and the DAW sees no format change.
    - **Anything else** (channel counts, sample rate, interface set, Sync Source, engine buffer), or hardware that no longer matches the running graph: when the rate changes, the Sync Source rate changed, or audio starts, the Sync Source is asked for the target rate while routing continues, and locked interfaces follow its confirmed rate. Other changes leave hardware rates alone. The service requests a fresh virtual-device generation through Core Audio's `RequestDeviceConfigurationChange`. Only after HAL has applied that generation does it replace the hardware engine. Expect an audio interruption when the change is actually applied.
-4. The service writes a timestamped `runtime-status.json`. The panel treats a snapshot older than 12 seconds as "service not responding".
+4. The service writes a timestamped `runtime-status.json`. It includes a structured health level (`idle`, `healthy`, `warning`, `error`) for presentation; this value never controls audio. The panel treats a snapshot older than 12 seconds as "service not responding".
 
 When the panel opens, it starts the registered LaunchAgent (`launchctl kickstart`, bootstrapping it if needed). It never spawns an unmanaged copy of the service when a LaunchAgent is registered. A process lock (`runtime.lock`) guarantees a single engine.
 
@@ -172,3 +172,9 @@ These were considered and deliberately rejected or deferred. The [architecture r
 - **Adding or removing an interface restarts the transport.** Only routing-only edits are seamless. Preserving the Sync Source callback across graph changes is possible future work.
 - **Tagged sample storage is kept** after profiling; a cheaper "high-water mark" scheme is unsafe after gaps and wraparound.
 - **File-based control channel instead of XPC** between panel and service, because it removed polling without adding a second protocol.
+
+### Status presentation and drift compensation
+
+`SPStatus` reports the UIDs of secondary aggregate paths for which `AudioDeviceStart` succeeded. The controller uses those UIDs, rather than the requested preset checkbox, to omit compensated sample-rate mismatches from both status and notifications. Rate-control warnings carry an optional secondary UID so that a refused secondary rate follow does not remain a warning once that secondary is running through resampling. Master-rate failures, metadata errors and engine startup warnings remain visible. This records successful startup, not a new liveness/quality monitor. Driver/broker shared memory and audio decisions are unchanged; update the panel and service together for the new status JSON.
+
+On healthy status, the service clears its known problem notifications (delivered and pending), including those left by a previous service process, and resets notification deduplication. It does not clear on warning, error, idle or unknown status. Each occurrence has a unique delivery ID so an authorization or delivery completion arriving after resolution can remove its own stale notification without removing a later occurrence. Notification bookkeeping stays on the main actor and does not control audio.

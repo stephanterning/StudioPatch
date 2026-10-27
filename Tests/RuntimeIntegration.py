@@ -1,7 +1,7 @@
 import os,json,time,subprocess,pathlib,sys,shutil
 root=pathlib.Path(sys.argv[2]).resolve();root.mkdir(exist_ok=True)
 executable=sys.argv[1]
-for f in ('fail','request','events','runtime-status.json','notifications.jsonl','disconnected','bad-object','stale-hardware','secondary-present','start-fail','availability','clock-skew','names-fail','metadata-gap','inventory-bad-object','publish-fail','locked-refuses','master-refuses','secondary-rate','rate-error','inventory-rate','ack-fail','configure-fail','configure-unavailable','master-rate-unreadable','write-then-unreadable','configure-pending','configure-confirmation-fail','start-reject','restore-refuses','configure-delay','clock-not-ready','clock-delay'):
+for f in ('fail','request','events','runtime-status.json','notifications.jsonl','visible-notifications.json','disconnected','bad-object','stale-hardware','secondary-present','start-fail','availability','clock-skew','names-fail','metadata-gap','inventory-bad-object','publish-fail','locked-refuses','master-refuses','secondary-rate','rate-error','inventory-rate','ack-fail','configure-fail','configure-unavailable','master-rate-unreadable','write-then-unreadable','configure-pending','configure-confirmation-fail','start-reject','restore-refuses','configure-delay','clock-not-ready','clock-delay'):
  (root/f).unlink(missing_ok=True)
 preset={'inputCount':2,'outputCount':2,'sampleRate':96000,'bufferFrames':64,'delayFrames':256,'masterUID':'mock','devices':[{'uid':'mock','drift':False}],'inputs':[{'deviceUID':'mock','channel':1},None],'outputs':[]}
 def save():
@@ -18,18 +18,28 @@ def wait(predicate,seconds=10):
 def all_notifications():
  path=root/'notifications.jsonl'
  return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+def visible_notifications():
+ path=root/'visible-notifications.json'
+ return list(json.loads(path.read_text()).values()) if path.exists() else []
+def visible_problems():
+ return [n for n in visible_notifications() if n['id']!='unrelated-note']
 def notifications():
  return [n for n in all_notifications() if n['id'] not in ['device-available','device-unavailable']]
 def availability_notifications():
  return [n for n in all_notifications() if n['id'] in ['device-available','device-unavailable']]
 def available():
  return (root/'availability').exists() and (root/'availability').read_text()=='1'
+# Delivered problems from an earlier service process must also disappear on green.
+(root/'visible-notifications.json').write_text(json.dumps({
+ 'sync-mismatch':{'id':'sync-mismatch'},'rate-refused.previous-process':{'id':'rate-refused'},
+ 'unrelated-note':{'id':'unrelated-note'}}))
 save();env=dict(os.environ,STUDIOPATCH_TEST_DIRECTORY=str(root))
 p=subprocess.Popen([executable],env=env,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
 try:
  wait(lambda s:s['running'] and available());print('PASS: autonomous start without panel',flush=True)
  # System notifications report problems only, never a successful start.
  assert all_notifications()==[],all_notifications()
+ assert visible_problems()==[] and [n['id'] for n in visible_notifications()]==['unrelated-note']
  duplicate=subprocess.run([executable],env=env,timeout=5)
  assert duplicate.returncode==0 and p.poll() is None
  print('PASS: singleton prevents duplicate engine',flush=True)
@@ -47,6 +57,7 @@ try:
  time.sleep(2)
  events=(root/'events').read_text();assert events.count('start')==1 and events.count('stop')==0,events
  assert [n['id'] for n in notifications()]==['format-failed'],notifications()
+ assert [n['id'] for n in visible_problems()]==['format-failed']
  assert '96000 Hz' in notifications()[0]['body'] and '3 From Computer' in notifications()[0]['body'] and 'remains active' in notifications()[0]['body']
  (root/'configure-fail').unlink();time.sleep(2)
  assert (root/'events').read_text().count('start')==1
@@ -57,7 +68,8 @@ try:
  preset['outputCount']=3;save()
  wait(lambda s:s['running'] and (root/'events').read_text().count('start')==2,12)
  assert [n['id'] for n in notifications()]==['format-failed'],notifications()
- print('PASS: changing the setting again applies it without a success notification',flush=True)
+ assert visible_problems()==[],visible_problems()
+ print('PASS: changing the setting again clears the resolved failure without a success notification',flush=True)
  (root/'request').write_text('48000')
  wait(lambda s:s['running'] and s['rate']==48000)
  assert float((root/'request').read_text())==0
@@ -84,7 +96,8 @@ try:
  print('PASS: hot unplug updates inventory during retries, preserves selection and reports missing hardware before driver failure',flush=True)
  (root/'disconnected').unlink();(root/'fail').unlink();preset['sampleRate']=88200;save()
  wait(lambda s:s['running'] and len(s['devices'])==1,12)
- print('PASS: reconnect recovers automatically',flush=True)
+ assert not any(n['id']=='device-unavailable' for n in visible_problems())
+ print('PASS: reconnect recovers automatically and clears the disconnection notification',flush=True)
  assert available() and [n['id'] for n in availability_notifications()]==['device-unavailable']
  # Every preset member is required, even a secondary with no routes.
  (root/'secondary-present').write_text('1')
@@ -244,7 +257,9 @@ try:
  before=counts()
  (root/'configure-unavailable').write_text('1');preset['outputCount']=4;save()
  wait(lambda s:s['running'] and 'not yet applied' in s['message'] and 'broker unavailable' in s['message'],10)
- time.sleep(2)
+ # Keep orange between retries too, while the failure message remains visible.
+ for _ in range(10):
+  time.sleep(.5);assert status()['health']=='warning',status()
  assert counts()==before and available() and status()['running'],(before,counts())
  (root/'configure-unavailable').unlink()
  wait(lambda s:s['running'] and counts()[0]==before[0]+1 and 'not yet applied' not in s['message'],15)
@@ -415,6 +430,68 @@ try:
  (root/'clock-not-ready').unlink();wait(lambda s:s['running'] and available())
  assert counts()==before
  print('PASS: an unavailable first clock returns to normal publication polling without stopping or restarting audio',flush=True)
+ # Presentation tracks running, compensated paths rather than the checkbox.
+ (root/'secondary-present').write_text('1');(root/'secondary-rate').write_text('96000')
+ preset.update(virtualDeviceUID='se.studiopatch.preset.status',sampleRate=96000,inputCount=2,outputCount=2,
+               inputs=[{'deviceUID':'mock','channel':1},None],outputs=[],
+               devices=[{'uid':'mock','drift':False},{'uid':'secondary','drift':False,'syncLocked':False}]);save()
+ wait(lambda s:s['running'] and s['health']=='healthy' and json.loads((root/'names.json').read_text())['uid']==preset['virtualDeviceUID'],15)
+ before=counts();notes_before=len(notifications());(root/'secondary-rate').write_text('44100')
+ wait(lambda s:s['health']=='warning' and 'not in sync' in s['message'],10)
+ assert counts()==before and [n['id'] for n in notifications()[notes_before:]]==['sync-mismatch']
+ print('PASS: uncompensated mismatch is orange even with sync lock off, without touching audio',flush=True)
+ assert [n['id'] for n in visible_problems()]==['sync-mismatch']
+ (root/'status-fail').write_text('1')
+ wait(lambda s:'Engine status unavailable' in s['message'])
+ assert [n['id'] for n in visible_problems()]==['sync-mismatch'] # unknown is not resolved
+ (root/'status-fail').unlink()
+ (root/'secondary-rate').write_text('96000');wait(lambda s:s['health']=='healthy',10)
+ assert visible_problems()==[],visible_problems()
+ recurrence=len(notifications());(root/'secondary-rate').write_text('44100')
+ wait(lambda s:s['health']=='warning' and 'not in sync' in s['message'],10)
+ assert len(notifications())==recurrence+1 and [n['id'] for n in visible_problems()]==['sync-mismatch']
+ assert counts()==before
+ print('PASS: resolved notifications disappear on green, remain on unknown status, and notify again on recurrence',flush=True)
+
+ # Use a structural edit too: the fake routing operation intentionally accepts
+ # all live updates; the real engine classifies drift changes as graph changes.
+ preset['devices'][1]['drift']=True;preset['outputCount']=3;notes_before=len(notifications());save()
+ wait(lambda s:s['running'] and s['health']=='healthy' and json.loads((root/'started.json').read_text())['outputCount']==3,15)
+ assert 'not in sync' not in status()['message'] and len(notifications())==notes_before
+ assert visible_problems()==[],visible_problems()
+ before=counts();(root/'secondary-rate').write_text('48000');time.sleep(6)
+ assert status()['health']=='healthy' and 'not in sync' not in status()['message'] and counts()==before and len(notifications())==notes_before
+ # Even a refused rate-follow request is not a fault in a running compensated path.
+ (root/'locked-refuses').write_text('1');preset['devices'][1]['syncLocked']=True;preset['sampleRate']=88200;save()
+ wait(lambda s:s['running'] and s['rate']==88200 and s['health']=='healthy',15)
+ assert 'does not support' not in status()['message'] and 'not in sync' not in status()['message'] and len(notifications())==notes_before
+ print('PASS: active drift compensation suppresses mismatch text and notifications, including a refused secondary rate follow',flush=True)
+ (root/'locked-refuses').unlink()
+ # The checkbox must not hide a secondary that failed to start, even at the same rate.
+ (root/'secondary-rate').write_text('88200');(root/'compensation-start-fail').write_text('1')
+ preset['outputCount']=4;save()
+ wait(lambda s:s['running'] and s['health']=='warning' and 'secondary was not started' in s['message'],15)
+ before=counts();time.sleep(2);assert counts()==before and available()
+ print('PASS: a requested but failed compensated path stays orange with a startup warning while the master runs',flush=True)
+ (root/'compensation-start-fail').unlink();preset['outputCount']=3;save()
+ wait(lambda s:s['running'] and s['health']=='healthy',15)
+ before=counts();(root/'status-fail').write_text('1')
+ wait(lambda s:s['health']=='warning' and 'Engine status unavailable' in s['message'])
+ assert counts()==before
+ (root/'status-fail').unlink();wait(lambda s:s['health']=='healthy')
+ print('PASS: unreadable status is orange without stopping audio and clears when reads recover',flush=True)
+ (root/'start-reject').write_text('4');preset['outputCount']=4;save()
+ wait(lambda s:not s['running'] and s['health']=='error' and 'start failure' in s['message'],15)
+ assert available()
+ (root/'start-reject').unlink();wait(lambda s:s['running'] and s['health']=='healthy',15)
+ assert visible_problems()==[],visible_problems()
+ print('PASS: a failed applied configuration is red and its notification clears when the existing retry succeeds',flush=True)
+ # Empty selection is intentional idle, not an audio error.
+ configured=json.loads(json.dumps(preset));preset['devices']=[];save()
+ wait(lambda s:not s['running'] and s['health']=='idle')
+ preset=configured;save();wait(lambda s:s['running'] and s['health']=='healthy',15)
+ assert [n['id'] for n in visible_notifications()]==['unrelated-note']
+ print('PASS: no active configuration is gray; notification cleanup leaves unrelated identifiers alone',flush=True)
  # A new service starting with missing hardware never publishes a placeholder.
  offline=root/'offline-start';offline.mkdir()
  (offline/'last-session.json').write_text(json.dumps(preset));(offline/'disconnected').write_text('1')

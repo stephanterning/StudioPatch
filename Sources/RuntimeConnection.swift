@@ -3,11 +3,15 @@ import UserNotifications
 import AVFoundation
 import os
 
+enum RuntimeHealth: String, Codable {
+    case idle, healthy, warning, error
+}
 struct RuntimeSnapshot: Codable {
     var date = Date()
     var devices: [Device]
     var installed: Bool
     var running: Bool
+    var health: RuntimeHealth
     var message: String
     var rate: Int
     var latencyDiagnostics: String? = nil
@@ -29,42 +33,88 @@ enum RuntimeConnection {
     }
     // System notifications report problems only; successful changes are shown
     // in the panel's status line.
-    static func notifyProblem(_ identifier:String,title:String,body:String) {
+    @MainActor static func notifyProblem(_ identifier:String,title:String,body:String) {
         notify(identifier:identifier,title:"StudioPatch: "+title,body:body)
     }
-    static func notifyDisconnected(_ name:String,reason:String) {
+    @MainActor static func notifyDisconnected(_ name:String,reason:String) {
         notify(identifier:"device-unavailable",title:"StudioPatch: audio interface disconnected",
                body:"\(name) was removed from Core Audio. \(reason)")
     }
-    private static func notify(identifier:String,title:String,body:String) {
+    private static let problemIDs:Set<String> = ["device-unavailable","runtime-failure","format-failed","rate-refused","sync-mismatch"]
+    @MainActor private static var notificationIDs:[String:String] = [:]
+    @MainActor private static var notificationsCleared=false
+
+    // Unique delivery IDs let a late authorization/add callback discard its old
+    // notification without deleting a newer occurrence of the same problem.
+    @MainActor private static func obsoleteProblemIDs(_ identifiers:[String]) -> [String] {
+        identifiers.filter { id in
+            !notificationIDs.values.contains(id) && problemIDs.contains { id == $0 || id.hasPrefix($0+".") }
+        }
+    }
+    @MainActor static func clearProblemNotifications() {
+        guard !notificationsCleared else { return }
+        notificationsCleared=true;notificationIDs.removeAll()
         if ProcessInfo.processInfo.environment["STUDIOPATCH_TEST_DIRECTORY"] != nil {
-            // Exercise the actual service decisions without displaying test notifications.
+            updateTestNotifications { visible in
+                for id in obsoleteProblemIDs(Array(visible.keys)) { visible.removeValue(forKey:id) }
+            }
+            return
+        }
+        let center=UNUserNotificationCenter.current()
+        Task {
+            let delivered=await center.deliveredNotifications()
+            center.removeDeliveredNotifications(withIdentifiers:obsoleteProblemIDs(delivered.map { $0.request.identifier }))
+            let pending=await center.pendingNotificationRequests()
+            center.removePendingNotificationRequests(withIdentifiers:obsoleteProblemIDs(pending.map(\.identifier)))
+        }
+    }
+    // The isolated runtime records a visible notification set as well as the
+    // existing append-only history; tests never touch macOS Notification Center.
+    private static func updateTestNotifications(_ update:(inout [String:[String:String]])->Void) {
+        let url=directory.appendingPathComponent("visible-notifications.json")
+        do {
+            var visible=(try? JSONDecoder().decode([String:[String:String]].self,from:Data(contentsOf:url))) ?? [:]
+            update(&visible)
+            try JSONEncoder().encode(visible).write(to:url,options:.atomic)
+        } catch { NSLog("StudioPatch test notifications: %@",error.localizedDescription) }
+    }
+    @MainActor private static func notify(identifier:String,title:String,body:String) {
+        notificationsCleared=false
+        let deliveryID=identifier+"."+UUID().uuidString
+        let previous=notificationIDs.updateValue(deliveryID,forKey:identifier) ?? identifier
+        if ProcessInfo.processInfo.environment["STUDIOPATCH_TEST_DIRECTORY"] != nil {
+            let value=["id":identifier,"title":title,"body":body]
             let url=directory.appendingPathComponent("notifications.jsonl")
             do {
                 var data=(try? Data(contentsOf:url)) ?? Data()
-                data.append(try JSONSerialization.data(withJSONObject:["id":identifier,"title":title,"body":body]))
-                data.append(0x0a)
+                data.append(try JSONSerialization.data(withJSONObject:value));data.append(0x0a)
                 try data.write(to:url,options:.atomic)
+                updateTestNotifications { visible in
+                    visible.removeValue(forKey:previous);visible[deliveryID]=value
+                }
             } catch { NSLog("StudioPatch test notification: %@",error.localizedDescription) }
             return
         }
         let center=UNUserNotificationCenter.current()
-        let submit = {
-            let content=UNMutableNotificationContent(); content.title=title; content.body=body
-            center.add(UNNotificationRequest(identifier:identifier,content:content,trigger:nil)) { error in
-                let logger=Logger(subsystem:"se.studiopatch.app",category:"notifications")
-                if let error { logger.error("Delivery failed: \(String(describing:error),privacy:.public)") }
-                else { logger.notice("Notification accepted: \(identifier,privacy:.public)") }
-            }
-        }
-        center.getNotificationSettings { settings in
-            if settings.authorizationStatus == .notDetermined {
-                // The launch agent has its own authorization identity on macOS.
-                center.requestAuthorization(options:[.alert,.sound]) { granted,error in
-                    if granted { submit() }
-                    else { Logger(subsystem:"se.studiopatch.app",category:"notifications").error("Authorization failed: \(String(describing:error),privacy:.public)") }
+        center.removePendingNotificationRequests(withIdentifiers:[previous])
+        center.removeDeliveredNotifications(withIdentifiers:[previous])
+        Task {
+            let logger=Logger(subsystem:"se.studiopatch.app",category:"notifications")
+            do {
+                let settings=await center.notificationSettings()
+                var granted=settings.authorizationStatus == .authorized
+                if settings.authorizationStatus == .notDetermined {
+                    // The launch agent has its own authorization identity on macOS.
+                    granted=try await center.requestAuthorization(options:[.alert,.sound])
                 }
-            } else if settings.authorizationStatus == .authorized { submit() }
+                guard granted, notificationIDs[identifier] == deliveryID else { return }
+                let content=UNMutableNotificationContent();content.title=title;content.body=body
+                try await center.add(UNNotificationRequest(identifier:deliveryID,content:content,trigger:nil))
+                if notificationIDs[identifier] != deliveryID {
+                    center.removePendingNotificationRequests(withIdentifiers:[deliveryID])
+                    center.removeDeliveredNotifications(withIdentifiers:[deliveryID])
+                } else { logger.notice("Notification accepted: \(identifier,privacy:.public)") }
+            } catch { logger.error("Notification failed: \(String(describing:error),privacy:.public)") }
         }
     }
 

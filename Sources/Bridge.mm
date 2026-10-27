@@ -472,11 +472,13 @@ extern "C" char* SPStatus() { @autoreleasepool {
         diagnostics=[[NSString alloc] initWithData:[NSJSONSerialization dataWithJSONObject:values options:0 error:nil] encoding:NSUTF8StringEncoding];
     }catch(const std::exception& e){diagnostics=[@"unavailable: " stringByAppendingString:@(e.what())];}
     NSMutableArray* warnings=[NSMutableArray array];
+    NSMutableArray* driftCompensatedUIDs=[NSMutableArray array];
     if(engine) {
+        for(auto& d:engine->devices)if(d->aggregate && d->started)[driftCompensatedUIDs addObject:@(d->uid.c_str())];
         for(auto& warning:engine->deviceWarnings)[warnings addObject:@(warning.c_str())];
         if(!engine->routeWarning.empty())[warnings addObject:@(engine->routeWarning.c_str())];
     }
-    return response(@{@"running":@(engine!=nullptr),@"stale":@(engine && engine->stale()),@"warnings":warnings,
+    return response(@{@"running":@(engine!=nullptr),@"stale":@(engine && engine->stale()),@"warnings":warnings,@"driftCompensatedUIDs":driftCompensatedUIDs,
         @"cycles":@(engine?engine->cycles.load():0),@"badBuffers":@(engine?engine->badBuffers.load():0),
         @"latencyDiagnostics":diagnostics ?: @"unavailable",@"bufferFrames":@(engine?engine->actualBuffer.load():0)});
 } }
@@ -531,7 +533,7 @@ extern "C" char* SPSetHardwareRate(const char* raw) { @autoreleasepool {
         if(!master) throw std::runtime_error("The Sync Source is unavailable.");
         NSMutableArray* warnings=[NSMutableArray array];
         bool wroteSyncSource=false;
-        auto follow=[&](AudioDeviceID id,double target) {
+        auto follow=[&](AudioDeviceID id,double target,NSString* uid) {
             std::string name=stringProperty(id,kAudioObjectPropertyName).UTF8String ?: "";
             const auto rate=std::to_string(std::llround(target))+" Hz";
             try {
@@ -547,10 +549,10 @@ extern "C" char* SPSetHardwareRate(const char* raw) { @autoreleasepool {
                     std::this_thread::sleep_for(std::chrono::milliseconds(25));
                 if(!patch::sameRate(get<Float64>(id,kAudioDevicePropertyNominalSampleRate),target))throw std::runtime_error("did not confirm "+rate);
             } catch(const std::exception& error) {
-                [warnings addObject:[NSString stringWithFormat:@"%s %s.",name.empty()?"An interface":name.c_str(),error.what()]];
+                [warnings addObject:@{@"message":[NSString stringWithFormat:@"%s %s.",name.empty()?"An interface":name.c_str(),error.what()],@"compensatedUID":id==master?(NSObject*)[NSNull null]:(NSObject*)uid}];
             }
         };
-        follow(master,[d[@"sampleRate"] doubleValue]);
+        follow(master,[d[@"sampleRate"] doubleValue],masterUID);
         // The caller may undo only a Sync Source write made by this call.
         NSMutableDictionary* result=[@{@"warnings":warnings,@"wroteSyncSource":@(wroteSyncSource)} mutableCopy];
         // Only a confirmed rate is reported. An unreadable Sync Source leaves the
@@ -558,14 +560,14 @@ extern "C" char* SPSetHardwareRate(const char* raw) { @autoreleasepool {
         double rate=0;
         try { rate=get<Float64>(master,kAudioDevicePropertyNominalSampleRate); }
         catch(const std::exception& error) {
-            [warnings addObject:[NSString stringWithFormat:@"The Sync Source rate could not be read: %s.",error.what()]];
+            [warnings addObject:@{@"message":[NSString stringWithFormat:@"The Sync Source rate could not be read: %s.",error.what()]}];
             return response(result);
         }
         for(NSDictionary* m in d[@"devices"]) {
             NSString* uid=m[@"uid"];
             if(![m[@"syncLocked"] boolValue] || ![uid isKindOfClass:NSString.class] || [uid isEqual:masterUID])continue;
-            try { if(auto id=translate(uid))follow(id,rate); }
-            catch(const std::exception& error) { [warnings addObject:[NSString stringWithFormat:@"%@ could not be checked: %s.",uid,error.what()]]; }
+            try { if(auto id=translate(uid))follow(id,rate,uid); }
+            catch(const std::exception& error) { [warnings addObject:@{@"message":[NSString stringWithFormat:@"%@ could not be checked: %s.",uid,error.what()]}]; }
         }
         result[@"rate"]=@(rate);return response(result);
     } catch(const std::exception& e) { return failure(e); }

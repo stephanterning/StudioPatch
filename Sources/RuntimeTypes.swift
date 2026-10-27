@@ -103,7 +103,16 @@ struct LabelEntry: Identifiable {
     let device: String
     var id: Port { port }
 }
+struct HardwareRateWarning {
+    let message:String
+    let compensatedUID:String?
+    init?(_ value:[String:Any]) {
+        guard let message=value["message"] as? String else { return nil }
+        self.message=message; compensatedUID=value["compensatedUID"] as? String
+    }
+}
 struct EngineStatus: Decodable {
+    let driftCompensatedUIDs: [String]
     let running: Bool
     let stale: Bool
     let warnings: [String]
