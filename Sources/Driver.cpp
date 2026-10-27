@@ -27,8 +27,8 @@ struct Session {
     const bool useDirect;
     AsyncResource<SharedMapping> direct;
     bool retired = false;
-    explicit Session(Config c,bool useDirect=false) : config(c), capture(useDirect?0:c.inputs), playback(useDirect?0:c.outputs), useDirect(useDirect),
-        direct(useDirect?std::function<std::shared_ptr<SharedMapping>()>([generation=anchor,c]{return SharedMapping::connect(generation,c,true);}):nullptr) {
+    explicit Session(Config c,bool useDirect=false,std::function<std::shared_ptr<SharedMapping>()> acquire=nullptr) : config(c), capture(useDirect?0:c.inputs), playback(useDirect?0:c.outputs), useDirect(useDirect),
+        direct(useDirect?(acquire?std::move(acquire):std::function<std::shared_ptr<SharedMapping>()>([generation=anchor,c]{return SharedMapping::connect(generation,c,true);})):nullptr) {
         mach_timebase_info_data_t tb; mach_timebase_info(&tb);
         ticksPerFrame = 1e9 * double(tb.denom) / tb.numer / c.rate;
     }
@@ -66,13 +66,14 @@ public:
         if(session_->useDirect && !bridge_) {
             if(!session_->direct){memset(data,0,size);return;}
             auto& shared=*session_->direct->data;auto count=session_->config.inputs;
-            if(!clockReader_.alive(shared,mach_absolute_time()) || !count || size%(count*4)){memset(data,0,size);return;}
+            if(!shared.active.load() || !count || size%(count*4)){memset(data,0,size);return;}
             auto dest=static_cast<float*>(data);auto start=int64_t(std::llround(time))-shared.inputPadding;
             if(shared.timingEnabled) {
+                ClockSample clock;clockReader_.read(shared,clock);
                 bool seen[MaxChannels]{};
                 for(uint32_t c=0;c<count;++c) {
                     auto owner=shared.captureOwner[c].load();if(owner>=MaxChannels || seen[owner])continue;seen[owner]=true;
-                    shared.captureMargin.observe(shared.capturePublications[owner],start,start+size/4/count,mach_absolute_time(),clockReader_.last.ticks);
+                    shared.captureMargin.observe(shared.capturePublications[owner],start,start+size/4/count,mach_absolute_time(),clock.ticks>0?clock.ticks:session_->ticksPerFrame);
                 }
             }
             for(uint32_t n=0;n<size/4/count;++n)for(uint32_t c=0;c<count;++c) {
@@ -98,7 +99,7 @@ public:
         if(session_->useDirect && !bridge_) {
             if(!session_->direct)return;
             auto& shared=*session_->direct->data;auto count=session_->config.outputs;
-            if(!clockReader_.alive(shared,mach_absolute_time()) || !count || size%(count*4))return;
+            if(!shared.active.load() || !count || size%(count*4))return;
             auto source=static_cast<const float*>(data);auto start=int64_t(std::llround(time));
             for(uint32_t n=0;n<size/4/count;++n)for(uint32_t c=0;c<count;++c)shared.playback.write(c,start+n,source[n*count+c]);
             if(shared.timingEnabled)shared.playbackPublications.publish(start,start+size/4/count,mach_absolute_time());
@@ -127,12 +128,14 @@ public:
     RoutedStream(std::shared_ptr<const aspl::Context> c,std::shared_ptr<aspl::Device> d,const aspl::StreamParameters& p)
         : aspl::Stream(c,d,p),device_(d) {}
 protected:
+    // A format at another rate is a rate request for the device; the stream
+    // keeps its running format until the device is reconfigured.
     OSStatus SetPhysicalFormatImpl(const AudioStreamBasicDescription& f) override {
-        if(auto d=device_.lock(); d && f.mSampleRate!=d->GetNominalSampleRate()) d->SetNominalSampleRateAsync(f.mSampleRate);
+        if(auto d=device_.lock(); d && f.mSampleRate!=d->GetNominalSampleRate()) return d->SetNominalSampleRateAsync(f.mSampleRate);
         return aspl::Stream::SetPhysicalFormatImpl(f);
     }
     OSStatus SetVirtualFormatImpl(const AudioStreamBasicDescription& f) override {
-        if(auto d=device_.lock(); d && f.mSampleRate!=d->GetNominalSampleRate()) d->SetNominalSampleRateAsync(f.mSampleRate);
+        if(auto d=device_.lock(); d && f.mSampleRate!=d->GetNominalSampleRate()) return d->SetNominalSampleRateAsync(f.mSampleRate);
         return aspl::Stream::SetVirtualFormatImpl(f);
     }
 };
@@ -279,13 +282,17 @@ protected:
         publishFormats(ranges); return result;
     }
     OSStatus SetNominalSampleRateImpl(Float64 rate) override {
-        if (!applying_ && rateRequest_ && rate != GetNominalSampleRate()) {
-            std::atomic_load(&session_)->ready.store(false);
-            rateRequest_(rate);
+        // A client rate request is only forwarded to the service. The device
+        // keeps reporting its running rate until a new configuration replaces
+        // it, so a refused request leaves clients seeing the correct rate.
+        if (!applying_) {
+            if (rateRequest_ && rate != GetNominalSampleRate()) rateRequest_(rate);
+            return noErr;
         }
         return aspl::Device::SetNominalSampleRateImpl(rate);
     }
     OSStatus StartIOImpl(UInt32,UInt32 count) override {
+        if(!GetIsAlive())return kAudioHardwareBadDeviceError;
         return count==0?GetControlHandler()->OnStartIO():noErr;
     }
     OSStatus StopIOImpl(UInt32,UInt32 count) override {
@@ -354,13 +361,37 @@ class PatchPlugin final : public aspl::Plugin {
     std::atomic<double> requestedRate_{0};
     std::atomic<bool> configuring_{false};
     bool direct_=false;
+    bool available_=true;
     std::atomic<int32_t> lastControlPID_{0};
 public:
-    void enableDirect(){direct_=true;}
+    void enableDirect(){direct_=true; setAvailable(false);}
+    OSStatus setAvailable(bool available) {
+        std::lock_guard lock(mutex_);
+        if(available==available_)return noErr;
+        // A physical disconnection must withdraw the device even while HAL
+        // has an outstanding format request. Publication still waits for it.
+        if(available && configuring_.load())return kAudioHardwareIllegalOperationError;
+        if(available) {
+            if(!session_->ready.load() || session_->retired ||
+               (direct_ && (!session_->direct || !session_->direct->data->active.load())))
+                return kAudioHardwareIllegalOperationError;
+            device_->SetIsAlive(true); AddDevice(device_);
+        } else {
+            { std::lock_guard control(session_->control); session_->retired=true; session_->ready=false; }
+            device_->SetIsAlive(false); RemoveDevice(device_);
+        }
+        available_=available;
+        NotifyPropertyChanged(AvailableProperty);
+        return noErr;
+    }
     std::string deviceUID() const { std::lock_guard lock(mutex_);return session_->config.uid; }
     void restoreName(const std::string& name) { std::lock_guard lock(mutex_); if(!name.empty())device_->setDisplayName(name); }
     explicit PatchPlugin(std::shared_ptr<aspl::Context> context,bool direct=false)
-        : aspl::Plugin(context), context_(context),direct_(direct) {
+        : aspl::Plugin(context), context_(context),direct_(direct),available_(!direct) {
+        RegisterCustomProperty(AvailableProperty,[this]() -> CFStringRef {
+            std::lock_guard lock(mutex_);
+            return CFStringCreateCopy(nullptr,available_ ? CFSTR("1") : CFSTR("0"));
+        });
         RegisterCustomProperty(DeviceNameProperty, [this]() -> CFStringRef {
             std::lock_guard lock(mutex_);
             return CFStringCreateWithCString(nullptr,device_->GetName().c_str(),kCFStringEncodingUTF8);
@@ -386,7 +417,8 @@ public:
         });
         RegisterCustomProperty(LatencyProperty,[this]() -> CFStringRef {
             std::lock_guard lock(mutex_);
-            auto text=std::to_string(session_->inputLatency.load())+" "+std::to_string(session_->outputLatency.load());
+            auto text=std::to_string(session_->inputLatency.load())+" "+std::to_string(session_->outputLatency.load())+
+                " "+std::to_string(session_->inputSafety.load())+" "+std::to_string(session_->outputSafety.load());
             return CFStringCreateWithCString(nullptr,text.c_str(),kCFStringEncodingUTF8);
         });
         RegisterCustomProperty(NamesProperty, [this]() -> CFStringRef {
@@ -424,8 +456,8 @@ public:
         RemoveDevice(device_); if(bridge_)RemoveDevice(bridge_);
         OSStatus result;
         try { result=configure(c,false); }
-        catch(...) { AddDevice(device_); if(bridge_)AddDevice(bridge_); throw; }
-        AddDevice(device_); if(bridge_)AddDevice(bridge_);
+        catch(...) { if(available_)AddDevice(device_); if(bridge_)AddDevice(bridge_); throw; }
+        if(available_)AddDevice(device_); if(bridge_)AddDevice(bridge_);
         return result;
     }
     OSStatus setNames(const ChannelNames& names, bool persist) {
@@ -448,8 +480,9 @@ public:
         if (!direct_ && session_ && session_->config.encode() == c.encode() && session_->ready.load()) return noErr;
         auto next = std::make_shared<Session>(c,direct_);
         if (configuring_.exchange(true)) return kAudioHardwareIllegalOperationError;
-        if (device_ && session_->config.uid == c.uid) {
-            session_->ready.store(false); next->ready.store(false);
+        if (device_ && session_->config.uid == c.uid && available_) {
+            // The current session stays usable until HAL performs the change;
+            // a rejected change therefore leaves it untouched.
             auto count=std::make_shared<std::atomic<int>>(0);
             auto aborted=std::make_shared<std::atomic<bool>>(false);
             auto done=[this,next,count,persist,c,aborted] {
@@ -458,7 +491,7 @@ public:
                 session_=next;
                 names_.inputs.resize(c.inputs); names_.outputs.resize(c.outputs);
                 device_->setNames(names_);
-                next->ready.store(requestedRate_.load()==0 || requestedRate_.load()==c.rate); configuring_.store(false);
+                configuring_.store(false);
                 if(persist && context_->Host) persistSnapshot(context_,"configuration-v1",c.encode());
                 NotifyPropertyChanged(ConfigProperty);
             };
@@ -469,6 +502,12 @@ public:
         struct FinishConfiguration { std::atomic<bool>& value; ~FinishConfiguration(){value=false;} } finish{configuring_};
         auto dev = endpoint(context_, next, false);
         auto bridge = direct_?nullptr:endpoint(context_, next, true);
+        const bool sameUID=device_ && session_->config.uid==c.uid;
+        const bool replacingIdentity=device_ && !sameUID;
+        if(sameUID) {
+            dev->setDisplayName(device_->GetName());
+            dev->SetAvailableSampleRatesAsync(device_->GetAvailableSampleRates());
+        }
         dev->onRateRequest([this](double rate) { requestedRate_.store(rate); NotifyPropertyChanged(RateRequestProperty); });
         if (device_) {
             { std::lock_guard control(session_->control); session_->retired=true; session_->ready=false; }
@@ -476,10 +515,15 @@ public:
             if(bridge_) { bridge_->SetIsAlive(false); RemoveDevice(bridge_); }
         }
         session_ = next; device_ = dev; bridge_ = bridge;
-        names_ = {}; // Defaults never leak between preset identities.
+        if(!sameUID) {
+            names_ = {}; // Defaults never leak between preset identities.
+            // A new identity is published explicitly after its hardware clock
+            // starts. Commit withdrawal here, not before a fallible control call.
+            if(replacingIdentity && available_){available_=false;NotifyPropertyChanged(AvailableProperty);}
+        }
         names_.inputs.resize(c.inputs); names_.outputs.resize(c.outputs);
         device_->setNames(names_);
-        AddDevice(device_); if(bridge_)AddDevice(bridge_); configuring_.store(false);
+        if(available_)AddDevice(device_); if(bridge_)AddDevice(bridge_); configuring_.store(false);
         if (persist && context_->Host) persistSnapshot(context_,"configuration-v1", c.encode());
         NotifyPropertyChanged(ConfigProperty);
         return noErr;
@@ -489,7 +533,7 @@ public:
     }
     OSStatus IsPropertySettable(AudioObjectID id, pid_t pid,
         const AudioObjectPropertyAddress* addr, Boolean* writable) const override {
-        if (addr && (addr->mSelector == DeviceNameProperty || addr->mSelector == ConfigProperty || addr->mSelector == NamesProperty || addr->mSelector == RatesProperty || addr->mSelector == RateRequestProperty || addr->mSelector == LatencyProperty)) {
+        if (addr && (addr->mSelector == AvailableProperty || addr->mSelector == DeviceNameProperty || addr->mSelector == ConfigProperty || addr->mSelector == NamesProperty || addr->mSelector == RatesProperty || addr->mSelector == RateRequestProperty || addr->mSelector == LatencyProperty)) {
             if (!writable) return kAudioHardwareIllegalOperationError;
             *writable = true; return noErr;
         }
@@ -497,7 +541,7 @@ public:
     }
     OSStatus SetPropertyData(AudioObjectID id, pid_t pid, const AudioObjectPropertyAddress* addr,
         UInt32 qualifierSize, const void* qualifier, UInt32 dataSize, const void* data) override {
-        if (!addr || (addr->mSelector != DeviceNameProperty && addr->mSelector != ConfigProperty && addr->mSelector != NamesProperty && addr->mSelector != RatesProperty && addr->mSelector != RateRequestProperty && addr->mSelector != LatencyProperty))
+        if (!addr || (addr->mSelector != AvailableProperty && addr->mSelector != DeviceNameProperty && addr->mSelector != ConfigProperty && addr->mSelector != NamesProperty && addr->mSelector != RatesProperty && addr->mSelector != RateRequestProperty && addr->mSelector != LatencyProperty))
             return aspl::Plugin::SetPropertyData(id, pid, addr, qualifierSize, qualifier, dataSize, data);
         if(direct_) {
             lastControlPID_=pid;
@@ -514,6 +558,10 @@ public:
         try {
             std::vector<char> text(capacity);
             if (!CFStringGetCString(str,text.data(),capacity,kCFStringEncodingUTF8)) return kAudioHardwareIllegalOperationError;
+            if(addr->mSelector==AvailableProperty) {
+                if(strcmp(text.data(),"0") && strcmp(text.data(),"1"))return kAudioHardwareIllegalOperationError;
+                return setAvailable(text[0]=='1');
+            }
             if(addr->mSelector==DeviceNameProperty) {
                 std::lock_guard lock(mutex_);
                 std::string name(text.data());
@@ -558,7 +606,6 @@ public:
     OSStatus OnInitialize() override {
         auto began=mach_absolute_time();
         os_log(OS_LOG_DEFAULT,"StudioPatch Initialize begin");
-        if(direct_)plugin_->enableDirect();
         const auto [text, found] = aspl::Storage(context_).ReadString("configuration-v1");
         const auto [displayName, hasDisplayName] = aspl::Storage(context_).ReadString("device-name-v2");
         const auto [scopedNames, hasScopedNames] = aspl::Storage(context_).ReadString("channel-names-v2");
@@ -569,6 +616,7 @@ public:
             std::shared_ptr<aspl::Context> context;AudioServerPlugInHostRef host;
             ~RestoreHost(){context->Host=host;}
         } restore{context_,context_->Host.exchange(nullptr)};
+        if(direct_)plugin_->enableDirect();
         if (found) { try { plugin_->restoreConfiguration(Config::parse(text)); } catch (...) {if(direct_)return kAudioHardwareUnspecifiedError;} }
         else if(direct_) {try{plugin_->restoreConfiguration(Config{});}catch(...){return kAudioHardwareUnspecifiedError;}}
         const auto prefix=plugin_->deviceUID()+"\n";

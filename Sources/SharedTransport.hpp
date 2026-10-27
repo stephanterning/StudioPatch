@@ -33,9 +33,10 @@ struct SharedPlane {
 };
 struct ClockSample { double sample=0, ticks=0;uint64_t host=0, epoch=0; };
 struct SharedTransport {
-    static constexpr uint64_t Magic=0x5350444952454358ULL;
+    static constexpr uint64_t Magic=0x5350444952454359ULL;
     uint64_t magic=Magic,generation=0;
-    uint32_t inputs=0,outputs=0,rate=0,padding=0,inputPadding=0;
+    uint32_t inputs=0,outputs=0,rate=0;
+    std::atomic<uint32_t> padding{0},inputPadding{0};
     std::atomic<uint32_t> active{0},clockSequence{0},claimed{0};
     std::atomic<int32_t> controllerPID{0};
     std::atomic<uint64_t> clockEpoch{0};
@@ -59,31 +60,20 @@ struct SharedTransport {
         }
         return false;
     }
-    bool alive(uint64_t now) const {
-        // HAL may predict the physical callback's current timestamp slightly
-        // ahead of mach_absolute_time(). Fresh predictions are valid too.
-        ClockSample c;return active.load() && clock(c) &&
-            std::abs(double(now)-double(c.host))<c.ticks*rate*.1;
-    }
 };
 // XPC maps whole pages; size is permitted to exceed the C++ payload size.
 inline bool validSharedRegion(const SharedTransport* data,size_t size,uint64_t generation) {
     return data && size>=sizeof(SharedTransport) && data->magic==SharedTransport::Magic && data->generation==generation;
 }
 // One instance per serialized reader (HAL endpoint/handler or DeviceIO).
-// A failed snapshot never overwrites the last coherent clock. Freshness still
-// expires normally, and active=0 always wins over cached state.
+// A failed snapshot never overwrites the last coherent clock. Timestamp age
+// is not an audio gate; readers use frame tags to find the requested samples.
 struct ClockReader {
     ClockSample last{};
     bool read(const SharedTransport& transport, ClockSample& result) {
         ClockSample candidate;
         if(transport.clock(candidate))last=candidate;
         result=last;return last.host && last.ticks>0;
-    }
-    bool alive(const SharedTransport& transport,uint64_t now) {
-        ClockSample c;
-        return transport.active.load() && read(transport,c) &&
-            std::abs(double(now)-double(c.host))<c.ticks*transport.rate*.1;
     }
 };
 struct HardwareTimeline {

@@ -105,7 +105,8 @@ struct LabelEntry: Identifiable {
 }
 struct EngineStatus: Decodable {
     let running: Bool
-    let invalidated: Bool
+    let stale: Bool
+    let warnings: [String]
     let cycles: UInt64
     let badBuffers: UInt64
     let bufferFrames: Int

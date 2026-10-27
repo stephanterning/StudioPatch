@@ -48,7 +48,7 @@ import CoreAudio
     private var autosaveReady = false
     private var timer: Timer?
     private var inventoryTicks=0
-    private var liveRuntime=false
+    private(set) var liveRuntime=false
     private var statusObserver: DirectoryObserver?
     var labelReader: (String) async throws -> CoreAudioLabels = CoreAudioLabels.read
     var labelWriter: (ChannelLabel) async throws -> Void = CoreAudioLabels.write
@@ -67,7 +67,9 @@ import CoreAudio
             let name=devices.first{$0.id==id}?.shortName ?? "Secondary"
             let input=(member["inputSkewFrames"] as? NSNumber)?.intValue ?? 0
             let output=(member["outputSkewFrames"] as? NSNumber)?.intValue ?? 0
-            return "\(name): input +\(input), output +\(output) samples relative to Sync Source" + (member["mutedClockFault"] as? Bool == true ? " · MUTED: clock alignment lost" : "")
+            let skew=(member["clockSkewFrames"] as? NSNumber)?.doubleValue ?? 0
+            return "\(name): input +\(input), output +\(output) samples relative to Sync Source"
+                + String(format:" · timestamp deviation %+.1f samples (diagnostic only)",skew)
         }.joined(separator:"\n")
     }
     var softwareMarginText: String {
@@ -484,9 +486,15 @@ import CoreAudio
         performIO("Checking audio devices…",quiet:true) { try await self.refreshInventory() }
     }
 
+    func restartService() {
+        do { try RuntimeConnection.launch(restart:true); running=false; message="Restarting the audio service…" }
+        catch { message="Could not restart the background engine: \(error.localizedDescription)" }
+    }
     private func readRuntime() {
+        let snapshot:RuntimeSnapshot
+        // A stale or missing snapshot means audio status is unknown, not running.
+        do { snapshot=try RuntimeConnection.read() } catch { running=false; message=error.localizedDescription; return }
         do {
-            let snapshot=try RuntimeConnection.read()
             let previousDevices=preset.knownDevices
             loadingRuntime=true
             updateInventory(snapshot.devices)
@@ -594,6 +602,10 @@ struct ContentView: View {
                     HStack(spacing:8) {
                         Circle().fill(m.running ? Color.green : Color.gray).frame(width:7,height:7)
                         Text(m.message).font(.caption).monospacedDigit().foregroundStyle(.secondary).lineLimit(2).help(m.message)
+                        if !m.running && m.liveRuntime {
+                            Button("Restart audio service",action:m.restartService).controlSize(.small)
+                                .help("Restarts the StudioPatch background service. Use it if audio stays off after the hardware is connected.")
+                        }
                     }
                     .frame(maxWidth:.infinity,alignment:.leading)
                     Text(m.activePresetTitle).lineLimit(1).help(m.activePresetTitle)
@@ -1038,6 +1050,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @StateObject var model=Model()
     var body: some Scene {
         WindowGroup {ContentView(m:model)}.defaultSize(width:1200,height:800)
+            .commands {
+                // Also reachable while audio runs, e.g. to retry an interface that could not start.
+                CommandGroup(after:.appSettings) { Button("Restart Audio Service",action:model.restartService) }
+            }
     }
 }
 

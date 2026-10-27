@@ -3,14 +3,17 @@
 extern "C" {
 #endif
 char* SPInventory(void);
-char* SPFollowMaster(const char* config);
 char* SPSetChannelNames(const char* names);
 char* SPReadChannelLabels(const char* uid);
 char* SPSetChannelLabel(const char* request);
+char* SPPrepareChange(const char* config);
 char* SPConfigure(const char* config);
+char* SPSetDeviceAvailable(const char* request);
+char* SPMissingDevices(const char* request);
 char* SPStart(const char* config);
 char* SPUpdateRouting(const char* config);
 char* SPStatus(void);
+char* SPPublishLatency(void);
 void SPStop(void);
 void SPFree(char* result);
 #ifdef __cplusplus

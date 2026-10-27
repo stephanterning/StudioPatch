@@ -18,7 +18,7 @@ The **sidebar** on the left holds the virtual device settings and the list of au
 
 - **To Computer / From Computer:** how many channels the StudioPatch device exposes in each direction. Each can be 0–128, but at least one direction must be above zero for audio to run. Counts do not need to be powers of two; for example, 37 inputs and 21 outputs is fine.
 - **Sync Source:** the interface whose clock drives the virtual device. Its latency is what StudioPatch reports to your DAW.
-- **Sample Rate:** the rates the Sync Source supports. Changing it here, or changing the StudioPatch device's rate in your DAW, updates the Sync Source and all locked interfaces.
+- **Sample Rate:** the rates the Sync Source supports. Changing it here, or changing the StudioPatch device's rate in your DAW, asks the Sync Source for that rate; locked interfaces then follow the rate the Sync Source actually reaches. If the Sync Source cannot change, StudioPatch and your DAW stay at the previous rate and you get a message and a notification.
 - **Advanced → I/O buffer:** the buffer size (32–1024 samples) StudioPatch uses when talking to the physical interfaces. This is separate from your DAW's buffer size. Smaller values give lower latency. The Advanced section also shows the current software margin and each secondary interface's latency difference relative to the Sync Source.
 
 ### Audio interfaces
@@ -27,8 +27,8 @@ Each physical interface has:
 
 - A **Use** checkbox to make its channels available for routing.
 - A **Sync** column. The Sync Source shows a clock icon. Every other selected interface shows a **lock**:
-  - **Locked:** StudioPatch sets this interface to the Sync Source's sample rate.
-  - **Unlocked:** StudioPatch never changes this interface's sample rate. If it does not match, audio stays muted until you fix the rate or lock the interface.
+  - **Locked:** follows the Sync Source when the Sync Source or StudioPatch changes rate. If it cannot follow, routing continues and you get a message and a notification. If you change a locked interface's rate yourself, StudioPatch does not set it back; it reports that the rates are not in sync.
+  - **Unlocked:** StudioPatch never changes this interface's sample rate. A mismatch does not block routing; you are responsible for the clock and rate settings.
 - **Drift correction** (secondary interfaces only). Leave it **off** when the interface is clocked from the Sync Source, for example over ADAT, word clock or MADI. Turn it **on** only for an interface that runs on its own clock; its routes then go through Apple's drift correction, which resamples them and adds some latency. StudioPatch cannot verify an external clock lock for you.
 
 Clearing **Use** on an interface that has routes asks for confirmation. **Remove** deletes the interface and all its routes, including inactive ones; **Cancel** keeps everything.
@@ -206,8 +206,11 @@ have not been exercised; their underlying file operations have automated tests.
 If a selected interface disappears (unplugged, powered off), it stays in the list and matrix, greyed out, with its last known channels and labels.
 
 - Greyed-out routes cannot be removed by clicking them in the matrix, and new routes cannot use unavailable ports. To replace an unavailable source, select a source on an available interface in the same **To Computer** row.
-- Audio is muted while a selected interface is missing, and the panel says which one.
-- When the same interface returns, StudioPatch picks it up automatically and audio resumes.
+- Every interface selected in the active preset is required, including interfaces with no routed channels. If any is missing, the preset’s virtual StudioPatch device is removed from Core Audio and the panel says which hardware is missing. DAWs see a disconnected audio device.
+- When all selected interfaces return and the audio engine and hardware clock are ready, StudioPatch publishes the virtual device again with the same preset UID, routing and channel names. A DAW may require you to select the device again.
+- At startup, or when loading a preset whose hardware is missing, the virtual device stays unavailable. An empty interface selection also leaves it unavailable.
+- StudioPatch sends one notification when a published device is removed because an interface is missing. Returning, publishing a device and switching presets are not problems and do not notify; the status line shows them.
+- Timestamp deviations do not mute, restart or remove a connected interface. StudioPatch reports their values under Advanced; you decide whether the clock configuration needs attention.
 
 ## Presets and autosave
 
@@ -222,15 +225,17 @@ On first launch, nothing is routed, so opening StudioPatch never produces sound 
 
 ## Status and notifications
 
-The status line at the top shows whether routing is active, the current I/O buffer and sample rate, or why audio is muted. StudioPatch also sends macOS notifications when the audio format changes, when a change fails, or when audio is muted. Allow notifications for StudioPatch in System Settings if you want them.
+The status line at the top shows whether routing is active, the current I/O buffer and sample rate, or why audio is off. Problems that do not affect audio, such as an unreadable settings file or a label that could not be written, are appended to the status line while routing continues. While Core Audio processes a requested change, the previous engine keeps running. A control error is reported and retried without stopping it. If Core Audio rejects the change, the previous configuration stays active; change the setting again or choose **Restart Audio Service** to retry. An applied format change interrupts audio while the new engine starts; if the new engine then cannot start, audio stays off with a message and StudioPatch retries automatically. It does not switch back to the previous configuration by itself.
 
-**Secondary interface muted: clock alignment was lost.** StudioPatch detected that a secondary interface drifted away from the Sync Source and muted it to avoid out-of-sync audio. Check the digital clock connection, then restart the service:
+**Notifications** are sent only for problems: a disconnected interface, a failed format change, audio off because of an error, a Sync Source that could not change rate, and a locked interface that is not in sync. Each problem notifies once while it lasts. Successful changes appear only in the status line. Allow notifications for StudioPatch in System Settings if you want them.
 
-```sh
-launchctl kickstart -k gui/$(id -u)/se.studiopatch.runtime
-```
+**Restart audio service.** When audio is off, a **Restart audio service** button appears next to the status line. It restarts the StudioPatch background service. Use it if audio stays off although the hardware is connected, for example after a Core Audio error that persists. The same command is in the StudioPatch menu, where you can also use it while audio runs to retry an interface that could not start. Restarting interrupts audio briefly.
 
-**Automatic recovery stopped.** The service already restarted itself once in the last ten minutes. Fix the underlying device problem, then reopen the panel to start the service again.
+If StudioPatch changes the Sync Source rate but Core Audio rejects the format, StudioPatch sets the Sync Source and locked interfaces back once to the rate that is still running. It never sets back a rate that something else changed, and a refusal is reported.
+
+**Clock diagnostics.** Advanced shows each secondary interface's timestamp deviation from the Sync Source. These values come from driver timestamps, not hardware clock-lock status. They do not mute audio, restart the engine or require acknowledgement. StudioPatch routes the samples the connected interfaces supply; configure external clocking and optional drift correction yourself. An unlocked interface's sample-rate mismatch does not prevent routing. No resampling is added automatically.
+
+**Warnings while routing.** StudioPatch starts with what the hardware accepts and tells you about the rest in the status line: a locked interface that is not in sync with the Sync Source, a Sync Source that refused a requested rate (StudioPatch stays at the rate it runs at), a secondary interface that could not start, and routes to channels an interface no longer offers, for example ADAT or MADI channels at double speed. Those routes stay silent. A secondary that could not start is tried again at the next configuration change, when it is reconnected, or when you choose **Restart Audio Service**.
 
 ## Interface-specific notes
 

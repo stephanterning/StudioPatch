@@ -10,7 +10,6 @@
 #include <CoreAudio/CoreAudio.h>
 #include <mach/mach_time.h>
 #include <algorithm>
-#include <map>
 #include <mutex>
 #include <set>
 #include <thread>
@@ -151,253 +150,6 @@ std::vector<Channel> channels(const std::vector<UInt32>& l) {
     for(uint32_t b=0;b<l.size();++b) for(uint32_t c=0;c<l[b];++c) result.push_back({b,c,l[b]});
     return result;
 }
-struct Route { Channel source,dest; };
-struct Watch { AudioObjectID id; AudioObjectPropertyAddress addr; AudioObjectPropertyListenerBlock block; };
-dispatch_queue_t listenerQueue() {
-    static auto queue=dispatch_queue_create("se.studiopatch.device-events",DISPATCH_QUEUE_SERIAL);return queue;
-}
-void addWatch(std::vector<Watch>& watches,AudioObjectID id,AudioObjectPropertyAddress a,
-              std::shared_ptr<std::atomic<bool>> state) {
-    watches.reserve(watches.size()+1);
-    // HAL owns a copy of this block. An in-flight notification owns only its
-    // reference-counted flag, never an engine pointer, even after removal.
-    AudioObjectPropertyListenerBlock block=^(UInt32,const AudioObjectPropertyAddress*){state->store(true);};
-    check(AudioObjectAddPropertyListenerBlock(id,&a,listenerQueue(),block),"Watch device changes");
-    watches.push_back({id,a,block});
-}
-void removeWatches(std::vector<Watch>& watches) {
-    for(auto& w:watches)AudioObjectRemovePropertyListenerBlock(w.id,&w.addr,listenerQueue(),w.block);
-    watches.clear();
-}
-#if defined(STUDIOPATCH_ENABLE_LEGACY)
-class LegacyEngine {
-public:
-    AudioDeviceID aggregate=0;
-    AudioDeviceIOProcID proc=nullptr;
-    std::shared_ptr<std::atomic<bool>> invalidation=std::make_shared<std::atomic<bool>>(false);
-    std::atomic<bool>& invalidated=*invalidation;
-    std::atomic<uint64_t> cycles{0}, badBuffers{0};
-    // Timestamp diagnostics only; never call HAL or allocate in the audio callback.
-    std::atomic<int64_t> ioTimestampGap{-1};
-    std::atomic<uint32_t> callbackFrames{0};
-    std::vector<UInt32> inLayout,outLayout;
-    std::vector<Route> routes;
-    std::vector<Watch> watches;
-    uint32_t actualBuffer=0;
-    uint64_t timingAnchor=0;
-    double ticksPerFrame=0;
-    Channel timingInput[2]{},timingOutput[2]{};
-    std::atomic<double> playbackDelay{-1};
-    AudioDeviceID syncSource=0;
-    uint32_t lastInputLatency=UINT32_MAX,lastOutputLatency=UINT32_MAX;
-    void publishLatency() {
-        if(invalidated.load())return;
-        auto timing=stringProperty(pluginID(),patch::TimingProperty);
-        uint64_t generation; double ticks,capture;
-        std::istringstream values(timing.UTF8String ?: "");
-        if(!(values>>generation>>ticks>>capture) || generation!=timingAnchor || capture<0)return;
-        const auto playback=playbackDelay.load();if(playback<0)return;
-        auto hardwareLatency=[&](bool input) {
-            auto scope=input?kAudioObjectPropertyScopeInput:kAudioObjectPropertyScopeOutput;
-            UInt32 streamLatency=0;
-            for(auto stream:list<AudioStreamID>(syncSource,kAudioDevicePropertyStreams,scope))
-                streamLatency=std::max(streamLatency,get<UInt32>(stream,kAudioStreamPropertyLatency));
-            return uint64_t(get<UInt32>(syncSource,kAudioDevicePropertyLatency,scope))+streamLatency;
-        };
-        auto in=uint32_t(std::llround(capture)+hardwareLatency(true));
-        auto out=uint32_t(std::llround(playback)+hardwareLatency(false));
-        if(in==lastInputLatency && out==lastOutputLatency)return;
-        auto text=std::to_string(timingAnchor)+" "+std::to_string(in)+" "+std::to_string(out);
-        CFStringRef value=CFStringCreateWithCString(nullptr,text.c_str(),kCFStringEncodingUTF8);
-        auto a=address(patch::LatencyProperty);
-        auto status=AudioObjectSetPropertyData(pluginID(),&a,0,nullptr,sizeof(value),&value);CFRelease(value);
-        check(status,"Publish latency report");lastInputLatency=in;lastOutputLatency=out;
-    }
-    ~LegacyEngine() { stop(); }
-    void watch(AudioObjectID id,AudioObjectPropertySelector key,AudioObjectPropertyScope scope=kAudioObjectPropertyScopeGlobal) {
-        addWatch(watches,id,address(key,scope),invalidation);
-    }
-    void stop() {
-        invalidated.store(true);
-        if (proc) { AudioDeviceStop(aggregate,proc); AudioDeviceDestroyIOProcID(aggregate,proc); proc=nullptr; }
-        removeWatches(watches);
-        if (aggregate) { AudioHardwareDestroyAggregateDevice(aggregate); aggregate=0; }
-    }
-    static OSStatus io(AudioDeviceID,const AudioTimeStamp*,const AudioBufferList* input,
-        const AudioTimeStamp* inputTime,AudioBufferList* output,const AudioTimeStamp* outputTime,void* p) {
-        auto& e=*static_cast<LegacyEngine*>(p);
-        if (output) for(UInt32 b=0;b<output->mNumberBuffers;++b)
-            if(output->mBuffers[b].mData) memset(output->mBuffers[b].mData,0,output->mBuffers[b].mDataByteSize);
-        if (e.invalidated.load(std::memory_order_relaxed)) return noErr;
-        if (!input || !output || input->mNumberBuffers!=e.inLayout.size() || output->mNumberBuffers!=e.outLayout.size()) {
-            e.badBuffers.fetch_add(1); e.invalidated.store(true); return noErr;
-        }
-        uint32_t frames=UINT32_MAX;
-        for(bool in:{true,false}) {
-            const auto* abl=in?input:output;
-            const auto& l=in?e.inLayout:e.outLayout;
-            for(uint32_t b=0;b<l.size();++b) {
-                const auto& buf=abl->mBuffers[b];
-                if(buf.mNumberChannels!=l[b] || !l[b] || !buf.mData || buf.mDataByteSize%(l[b]*4)) {
-                    e.badBuffers.fetch_add(1); e.invalidated.store(true); return noErr;
-                }
-                const auto n=buf.mDataByteSize/(l[b]*4);
-                if(frames==UINT32_MAX) frames=n;
-                if(n!=frames) { e.badBuffers.fetch_add(1); e.invalidated.store(true); return noErr; }
-            }
-        }
-        if(inputTime && outputTime &&
-            (inputTime->mFlags & kAudioTimeStampSampleTimeValid) &&
-            (outputTime->mFlags & kAudioTimeStampSampleTimeValid))
-            e.ioTimestampGap.store(int64_t(std::llround(outputTime->mSampleTime-inputTime->mSampleTime)),std::memory_order_relaxed);
-        e.callbackFrames.store(frames,std::memory_order_relaxed);
-        for(const auto& route:e.routes) {
-            const float* src=static_cast<const float*>(input->mBuffers[route.source.buffer].mData)+route.source.channel;
-            float* dst=static_cast<float*>(output->mBuffers[route.dest.buffer].mData)+route.dest.channel;
-            for(uint32_t f=0;f<frames;++f) dst[size_t(f)*route.dest.stride]=src[size_t(f)*route.source.stride];
-        }
-        if(inputTime && outputTime && (inputTime->mFlags&kAudioTimeStampHostTimeValid) &&
-            (outputTime->mFlags&kAudioTimeStampHostTimeValid)) {
-            const double inFrame=(double(inputTime->mHostTime)-double(e.timingAnchor))/e.ticksPerFrame;
-            const double outFrame=(double(outputTime->mHostTime)-double(e.timingAnchor))/e.ticksPerFrame;
-            auto& ia=e.timingInput[0];auto& ib=e.timingInput[1];
-            auto& oa=e.timingOutput[0];auto& ob=e.timingOutput[1];
-            auto a=static_cast<const float*>(input->mBuffers[ia.buffer].mData)+ia.channel;
-            auto b=static_cast<const float*>(input->mBuffers[ib.buffer].mData)+ib.channel;
-            auto x=static_cast<float*>(output->mBuffers[oa.buffer].mData)+oa.channel;
-            auto y=static_cast<float*>(output->mBuffers[ob.buffer].mData)+ob.channel;
-            for(uint32_t n=0;n<frames;++n)patch::encodeTiming(inFrame+n,x[n*oa.stride],y[n*ob.stride]);
-            auto n=frames/2;double source,delay;
-            if(patch::decodeTiming(a[n*ia.stride],b[n*ib.stride],outFrame+n,source) &&
-                patch::timingDelay(outFrame+n,source,delay)) e.playbackDelay.store(delay,std::memory_order_relaxed);
-        }
-        e.cycles.fetch_add(1,std::memory_order_relaxed);
-        return noErr;
-    }
-    void start(NSDictionary* d) {
-        const auto c=config(d);
-        if (currentConfig()!=c.encode()) throw std::runtime_error("Apply channel counts first, then reselect StudioPatch in the audio application.");
-        auto timing=stringProperty(pluginID(),patch::TimingProperty);
-        std::istringstream clock(timing.UTF8String ?: "");double previousDelay;
-        if(!(clock>>timingAnchor>>ticksPerFrame>>previousDelay) || ticksPerFrame<=0)
-            throw std::runtime_error("Install the latency-reporting driver before starting this service.");
-        const auto buffer=[d[@"bufferFrames"] unsignedIntValue];
-        if(buffer<32 || buffer>1024 || (buffer&(buffer-1))) throw std::runtime_error("Invalid buffer size");
-        if(c.delay<buffer*2) throw std::runtime_error("The transport margin must be at least two I/O buffers.");
-        NSArray* devices=d[@"devices"];
-        if(![devices isKindOfClass:[NSArray class]] || devices.count==0) throw std::runtime_error("Select at least one physical audio interface.");
-        NSMutableArray* subs=[NSMutableArray array];
-        std::map<std::string,std::pair<uint32_t,uint32_t>> offsets;
-        std::map<std::string,std::pair<uint32_t,uint32_t>> counts;
-        std::vector<AudioDeviceID> hardware;
-        uint32_t ins=0,outs=0;
-        NSString* master=d[@"masterUID"];
-        if(![master isKindOfClass:[NSString class]]) throw std::runtime_error("Select clock master");
-        bool haveMaster=false;
-        for(NSDictionary* member in devices) {
-            NSString* uid=member[@"uid"];
-            if(![uid isKindOfClass:[NSString class]] || [uid hasPrefix:@"se.studiopatch."])
-                throw std::runtime_error("Invalid physical device");
-            const std::string key=uid.UTF8String;
-            if(offsets.count(key)) throw std::runtime_error("Duplicate device");
-            const auto id=translate(uid);
-            if(!id) throw std::runtime_error("A selected audio device is missing. Routing was not started.");
-            if(get<UInt32>(id,kAudioDevicePropertyTransportType)==kAudioDeviceTransportTypeAggregate)
-                throw std::runtime_error("Select the physical interfaces directly instead of an existing aggregate device.");
-            const double rate=get<Float64>(id,kAudioDevicePropertyNominalSampleRate);
-            if(std::abs(rate-c.rate)>0.1) throw std::runtime_error(std::string(uid.UTF8String)+
-                " reports "+std::to_string(int(rate))+" Hz. Set both interfaces to the selected sample rate first.");
-            if(!get<UInt32>(id,kAudioDevicePropertyDeviceIsAlive)) throw std::runtime_error("Device is offline");
-            offsets[key]={ins,outs};
-            auto ni=total(layout(id,kAudioObjectPropertyScopeInput));
-            auto no=total(layout(id,kAudioObjectPropertyScopeOutput));
-            counts[key]={ni,no}; ins+=ni; outs+=no; hardware.push_back(id);
-            const bool primary=[uid isEqualToString:master]; haveMaster|=primary;
-            [subs addObject:@{@kAudioSubDeviceUIDKey:uid,
-                @kAudioSubDeviceDriftCompensationKey:@(!primary && [member[@"drift"] boolValue])}];
-        }
-        if(!haveMaster) throw std::runtime_error("The sync source must be one of the selected interfaces.");
-        syncSource=translate(master);
-        const auto bridgeInputOffset=ins,bridgeOutputOffset=outs;
-        if(!translate(@(patch::BridgeUID))) throw std::runtime_error("Internal bridge is unavailable");
-        [subs addObject:@{@kAudioSubDeviceUIDKey:@(patch::BridgeUID),@kAudioSubDeviceDriftCompensationKey:@YES}];
-        NSDictionary* desc=@{@kAudioAggregateDeviceNameKey:@"StudioPatch LegacyEngine",
-            @kAudioAggregateDeviceUIDKey:[@"se.studiopatch.engine." stringByAppendingString:NSUUID.UUID.UUIDString],
-            @kAudioAggregateDeviceIsPrivateKey:@YES,@kAudioAggregateDeviceIsStackedKey:@NO,
-            @kAudioAggregateDeviceMainSubDeviceKey:master,@kAudioAggregateDeviceSubDeviceListKey:subs};
-        check(AudioHardwareCreateAggregateDevice((__bridge CFDictionaryRef)desc,&aggregate),"Create private audio aggregate");
-        auto ba=address(kAudioDevicePropertyBufferFrameSize);
-        check(AudioObjectSetPropertyData(aggregate,&ba,0,nullptr,sizeof(buffer),&buffer),"Set engine buffer");
-        // Configuration publication is asynchronous. Bound the wait and validate the actual result.
-        for(int attempt=0;attempt<40;++attempt) {
-            inLayout=layout(aggregate,kAudioObjectPropertyScopeInput);
-            outLayout=layout(aggregate,kAudioObjectPropertyScopeOutput);
-            if(total(inLayout)==ins+c.outputs+patch::TimingChannels && total(outLayout)==outs+c.inputs+patch::TimingChannels) break;
-            std::this_thread::sleep_for(std::chrono::milliseconds(25));
-        }
-        if(total(inLayout)!=ins+c.outputs+patch::TimingChannels || total(outLayout)!=outs+c.inputs+patch::TimingChannels)
-            throw std::runtime_error("Aggregate channel layout did not match; no routing was started");
-        CFArrayRef full=get<CFArrayRef>(aggregate,kAudioAggregateDevicePropertyFullSubDeviceList);
-        NSArray* actual=CFBridgingRelease(full);
-        if(actual.count!=subs.count) throw std::runtime_error("Unexpected aggregate device order");
-        for(NSUInteger i=0;i<actual.count;++i)
-            if(![actual[i] isEqual:subs[i][@kAudioSubDeviceUIDKey]]) throw std::runtime_error("Unexpected aggregate device order");
-        for(bool input:{true,false}) {
-            auto scope=input?kAudioObjectPropertyScopeInput:kAudioObjectPropertyScopeOutput;
-            for(auto stream:list<AudioStreamID>(aggregate,kAudioDevicePropertyStreams,scope)) {
-                auto f=get<AudioStreamBasicDescription>(stream,kAudioStreamPropertyVirtualFormat);
-                if(f.mFormatID!=kAudioFormatLinearPCM || !(f.mFormatFlags&kAudioFormatFlagIsFloat) ||
-                    f.mBitsPerChannel!=32 || std::abs(f.mSampleRate-c.rate)>0.1)
-                    throw std::runtime_error("LegacyEngine requires native Float32 PCM at the selected sample rate");
-            }
-        }
-        const auto inputChannels=channels(inLayout),outputChannels=channels(outLayout);
-        for(unsigned n=0;n<patch::TimingChannels;++n) {
-            timingInput[n]=inputChannels.at(bridgeInputOffset+c.outputs+n);
-            timingOutput[n]=outputChannels.at(bridgeOutputOffset+c.inputs+n);
-        }
-        std::set<uint32_t> usedOutputs;
-        NSArray* captures=d[@"inputs"], *playbacks=d[@"outputs"];
-        if(![captures isKindOfClass:[NSArray class]] || captures.count!=c.inputs ||
-            ![playbacks isKindOfClass:[NSArray class]]) throw std::runtime_error("Invalid routing table");
-        auto resolve=[&](NSDictionary* r,bool input)->uint32_t {
-            NSString* uid=r[@"deviceUID"];
-            if(![uid isKindOfClass:[NSString class]]) throw std::runtime_error("Invalid route UID");
-            std::string key=uid.UTF8String;
-            auto number=[r[@"channel"] longLongValue];
-            if(!counts.count(key) || number<1 || uint64_t(number)>(input?counts[key].first:counts[key].second))
-                throw std::runtime_error("A mapped hardware channel is missing or out of range.");
-            return (input?offsets[key].first:offsets[key].second)+uint32_t(number-1);
-        };
-        for(uint32_t i=0;i<c.inputs;++i) {
-            if(captures[i]==[NSNull null]) continue;
-            auto source=resolve(captures[i],true);
-            routes.push_back({inputChannels.at(source),outputChannels.at(bridgeOutputOffset+i)});
-        }
-        for(NSDictionary* r in playbacks) {
-            const auto source=[r[@"virtualChannel"] longLongValue];
-            if(source<1 || uint64_t(source)>c.outputs) throw std::runtime_error("Invalid From Computer channel");
-            auto dest=resolve(r,false);
-            if(!usedOutputs.insert(dest).second) throw std::runtime_error("Two routes target the same hardware output");
-            routes.push_back({inputChannels.at(bridgeInputOffset+uint32_t(source-1)),outputChannels.at(dest)});
-        }
-        actualBuffer=get<UInt32>(aggregate,kAudioDevicePropertyBufferFrameSize);
-        if(actualBuffer*2>c.delay) throw std::runtime_error("Hardware buffer is larger than the configured transport margin");
-        for(auto id:hardware) {
-            watch(id,kAudioDevicePropertyDeviceIsAlive);
-            watch(id,kAudioDevicePropertyNominalSampleRate);
-            watch(id,kAudioDevicePropertyStreamConfiguration,kAudioObjectPropertyScopeInput);
-            watch(id,kAudioDevicePropertyStreamConfiguration,kAudioObjectPropertyScopeOutput);
-        }
-        watch(aggregate,kAudioDevicePropertyStreamConfiguration,kAudioObjectPropertyScopeInput);
-        watch(aggregate,kAudioDevicePropertyStreamConfiguration,kAudioObjectPropertyScopeOutput);
-        watch(aggregate,kAudioDevicePropertyBufferFrameSize);
-        invalidated.store(false);
-        check(AudioDeviceCreateIOProcID(aggregate,io,this,&proc),"Create audio callback");
-        check(AudioDeviceStart(aggregate,proc),"Start audio; allow microphone access if macOS requests it");
-    }
-};
-#endif
 #include "DirectEngine.hpp"
 using Engine=DirectEngine;
 std::mutex control;
@@ -445,7 +197,7 @@ extern "C" char* SPInventory() { @autoreleasepool {
         std::string config;
         // Driver health must not gate hardware discovery, especially during hot unplug.
         NSNumber* driverError=nil;
-        try { config=currentConfig(); installed=translate(@(patch::Config::parse(config).uid.c_str()))!=0; }
+        try { config=currentConfig(); installed=true; }
         catch(const HALError& e) { driverError=@(e.status); }
         catch(const std::exception&) { }
         if(installed) {
@@ -458,62 +210,6 @@ extern "C" char* SPInventory() { @autoreleasepool {
         return response(@{@"devices":devices,@"driverInstalled":@(installed),
             @"driverErrorStatus":driverError ?: (id)[NSNull null],@"driverConfig":@(config.c_str())});
     } catch(const std::exception& e) { return failure(e); }
-} }
-extern "C" char* SPFollowMaster(const char* raw) { @autoreleasepool {
-    std::lock_guard lock(control);
-    bool attempted=false;
-    try {
-        if(engine) throw std::runtime_error("Stop routing before changing the sample rate.");
-        NSDictionary* d=json(raw);
-        NSString* uid=d[@"masterUID"];
-        NSArray* members=d[@"devices"];
-        if(![uid isKindOfClass:[NSString class]] || ![members isKindOfClass:[NSArray class]])
-            throw std::runtime_error("Select a sync source and audio interfaces first.");
-        auto master=translate(uid);
-        if(!master) throw std::runtime_error("Sync source is missing.");
-        const double target=get<Float64>(master,kAudioDevicePropertyNominalSampleRate);
-        if(!patch::supportedSampleRate(target))
-            throw std::runtime_error("The virtual device does not support the sync source's sample rate.");
-        std::vector<patch::RateDevice> devices;
-        std::set<AudioDeviceID> seen;
-        for(NSDictionary* member in members) {
-            NSString* memberUID=member[@"uid"];
-            if(![memberUID isKindOfClass:[NSString class]] || [memberUID hasPrefix:@"se.studiopatch."])
-                throw std::runtime_error("Select physical audio interfaces for synchronization.");
-            auto id=translate(memberUID);
-            if(!id || !seen.insert(id).second) throw std::runtime_error("A selected interface is missing or listed twice.");
-            auto transport=get<UInt32>(id,kAudioDevicePropertyTransportType);
-            if(transport==kAudioDeviceTransportTypeAggregate || transport==kAudioDeviceTransportTypeVirtual)
-                throw std::runtime_error("Follow sync source applies to physical interfaces, not virtual or aggregate devices.");
-            if(!get<UInt32>(id,kAudioDevicePropertyDeviceIsAlive)) throw std::runtime_error("A selected interface is disconnected.");
-            patch::RateDevice dev{id,stringProperty(id,kAudioObjectPropertyName).UTF8String,
-                get<Float64>(id,kAudioDevicePropertyNominalSampleRate),false,false,{}};
-            dev.syncLocked=[member[@"syncLocked"] boolValue];
-            if(id!=master && dev.syncLocked && !patch::sameRate(dev.rate,target)) {
-                auto a=address(kAudioDevicePropertyNominalSampleRate); Boolean writable=false;
-                check(AudioObjectIsPropertySettable(id,&a,&writable),"Check sample rate control");
-                dev.writable=writable;
-                dev.running=get<UInt32>(id,kAudioDevicePropertyDeviceIsRunningSomewhere)!=0;
-                for(auto range:list<AudioValueRange>(id,kAudioDevicePropertyAvailableNominalSampleRates))
-                    dev.supported.emplace_back(range.mMinimum,range.mMaximum);
-            }
-            devices.push_back(std::move(dev));
-        }
-        patch::applyRates(devices,master,target,
-            [](uint32_t id){return get<Float64>(id,kAudioDevicePropertyNominalSampleRate);},
-            [&](uint32_t id,double rate){
-                if(get<UInt32>(id,kAudioDevicePropertyDeviceIsRunningSomewhere))
-                    throw std::runtime_error("Another application started using an interface. The sample rate change was cancelled.");
-                attempted=true;
-                auto a=address(kAudioDevicePropertyNominalSampleRate);
-                check(AudioObjectSetPropertyData(id,&a,0,nullptr,sizeof(rate),&rate),"The driver rejected the sample rate change");
-            },[]{std::this_thread::sleep_for(std::chrono::milliseconds(25));});
-        return response(@{@"ok":@YES,@"sampleRate":@(target)});
-    } catch(const std::exception& e) {
-        std::string message=e.what();
-        if(attempted) message+=" An interface may already have changed sample rate. Check the interface status; changes are not rolled back automatically.";
-        return response(@{@"error":@(message.c_str())});
-    }
 } }
 extern "C" char* SPSetChannelNames(const char* raw) { @autoreleasepool {
     std::lock_guard lock(control);
@@ -603,33 +299,135 @@ extern "C" char* SPSetChannelLabel(const char* raw) { @autoreleasepool {
         return response(@{@"ok":@YES});
     } catch(const std::exception& e) { return failure(e); }
 } }
+// Check control access before an intentional hardware rate write. The actual
+// configuration still executes while the current engine runs; this check is
+// never a reason to stop it and does not guarantee the next call will succeed.
+extern "C" char* SPPrepareChange(const char* raw) { @autoreleasepool {
+    std::lock_guard lock(control);
+    try { config(json(raw)); authorizeWrites(); return response(@{@"ok":@YES}); }
+    catch(const std::exception& e) { return failure(e); }
+} }
+// One outstanding HAL request. Keep its identity across slow confirmations and
+// failed control reads: retrying a query must not submit another configuration.
+namespace {
+struct ConfigurationChange {
+    enum Result { Pending, Applied, Rejected };
+    std::string pending;
+    uint64_t previousGeneration=0;
+    static uint64_t generation(AudioObjectID id) {
+        auto text=stringProperty(id,patch::DirectProperty);
+        auto value=std::strtoull(text.UTF8String,nullptr,10);
+        if(!value)throw std::runtime_error("The direct transport generation is unavailable.");
+        return value;
+    }
+    Result step(const patch::Config& wanted,void (*authorize)()=authorizeWrites) {
+        auto id=pluginID();
+        if(pending.empty()) {
+            authorize();
+            previousGeneration=generation(id);
+            auto a=address(patch::ConfigProperty);
+            CFStringRef value=CFStringCreateWithCString(nullptr,wanted.encode().c_str(),kCFStringEncodingUTF8);
+            auto result=AudioObjectSetPropertyData(id,&a,0,nullptr,sizeof(value),&value);
+            CFRelease(value);
+            check(result,"Request virtual device configuration");
+            pending=wanted.encode();
+        }
+        auto ready=stringProperty(id,patch::ReadyProperty);
+        if(![ready isEqual:@"0"] && ![ready isEqual:@"1"])throw std::runtime_error("The configuration status is unavailable.");
+        if([ready isEqual:@"0"])return Pending;
+        auto current=generation(id);
+        if(current==previousGeneration) {
+            bool same=pending==wanted.encode();pending.clear();
+            return same?Rejected:Pending;
+        }
+        if(currentConfig()!=pending)throw std::runtime_error("The driver configuration changed while applying the request.");
+        // Establish the new mapping/claim before releasing the old engine.
+        authorize();
+        bool same=pending==wanted.encode();pending.clear();
+        return same?Applied:Pending;
+    }
+};
+ConfigurationChange configurationChange;
+}
 extern "C" char* SPConfigure(const char* raw) { @autoreleasepool {
     std::lock_guard lock(control);
     try {
-        if(engine) throw std::runtime_error("Stop routing before changing channel counts.");
-        auto c=config(json(raw));
-        authorizeWrites();
-        auto id=pluginID(); auto a=address(patch::ConfigProperty);
-        CFStringRef value=CFStringCreateWithCString(nullptr,c.encode().c_str(),kCFStringEncodingUTF8);
-        auto result=AudioObjectSetPropertyData(id,&a,0,nullptr,sizeof(value),&value);
-        CFRelease(value);
-        check(result,"Request virtual device configuration");
-        auto ready=[&] {
-            auto property=address(patch::ReadyProperty); CFStringRef text=nullptr; UInt32 size=sizeof(text);
-            auto err=AudioObjectGetPropertyData(id,&property,0,nullptr,&size,&text);
-            bool value=!err && text && CFStringGetIntValue(text)==1;
-            if(text) CFRelease(text); return value;
-        };
-        for(int i=0;i<200 && (currentConfig()!=c.encode() || !ready());++i) std::this_thread::sleep_for(std::chrono::milliseconds(25));
-        if(currentConfig()!=c.encode() || !ready()) throw std::runtime_error("Core Audio did not confirm the new configuration within five seconds. Audio is muted.");
-        authorizeWrites();
-        return response(@{@"ok":@YES});
-    } catch(const std::exception& e) { return failure(e); }
+        auto result=configurationChange.step(config(json(raw)));
+        return response(@{@"ok":@(result==ConfigurationChange::Applied),
+            @"pending":@(result==ConfigurationChange::Pending),@"rejected":@(result==ConfigurationChange::Rejected)});
+    } catch(const std::exception& e) {
+        return response(@{@"ok":@NO,@"pending":@(!configurationChange.pending.empty()),@"failure":@(e.what())});
+    }
 } }
 extern "C" char* SPUpdateRouting(const char* raw) { @autoreleasepool {
     std::lock_guard lock(control);
-    try{return response(@{@"applied":@(engine && !engine->invalidated && engine->updateRouting(json(raw)))});}
+    try{return response(@{@"applied":@(engine && engine->updateRouting(json(raw)))});}
     catch(const std::exception& e){return failure(e);}
+} }
+// Inventory omits a device whose metadata could not be read. Only the UID
+// lookup and the alive flag decide that hardware is physically gone; a failed
+// read is not evidence of disconnection.
+extern "C" char* SPMissingDevices(const char* raw) { @autoreleasepool {
+    std::lock_guard lock(control);
+    try {
+        NSMutableArray* missing=[NSMutableArray array];
+        for(NSString* uid in json(raw)[@"uids"]) {
+            if(![uid isKindOfClass:NSString.class])continue;
+            CFStringRef cf=(__bridge CFStringRef)uid;AudioDeviceID id=0;UInt32 size=sizeof(id);
+            auto a=address(kAudioHardwarePropertyTranslateUIDToDevice);
+            if(AudioObjectGetPropertyData(kAudioObjectSystemObject,&a,sizeof(cf),&cf,&size,&id))continue;
+            UInt32 alive=1;size=sizeof(alive);a=address(kAudioDevicePropertyDeviceIsAlive);
+            if(!id || (!AudioObjectGetPropertyData(id,&a,0,nullptr,&size,&alive) && !alive))[missing addObject:uid];
+        }
+        return response(@{@"missing":missing});
+    } catch(const std::exception& e) { return failure(e); }
+} }
+extern "C" char* SPSetDeviceAvailable(const char* raw) { @autoreleasepool {
+    std::lock_guard lock(control);
+    // Retain an accepted change across a HAL enumeration timeout, so a later
+    // confirmed retry still emits exactly one notification.
+    static std::string pendingUID;
+    static bool pendingAvailable=false;
+    try {
+        auto request=json(raw);
+        const bool available=[request[@"available"] boolValue];
+        auto id=pluginID();auto a=address(patch::AvailableProperty);
+        if(!AudioObjectHasProperty(id,&a))throw std::runtime_error("The StudioPatch driver needs an update to support device availability.");
+        const auto c=patch::Config::parse(currentConfig());
+        if(available && ![request[@"uid"] isEqual:@(c.uid.c_str())])throw std::runtime_error("The preset changed before publishing its device.");
+        NSString* state=CFBridgingRelease(get<CFStringRef>(id,patch::AvailableProperty));
+        if(![state isEqual:@"0"] && ![state isEqual:@"1"])throw std::runtime_error("The driver returned an invalid availability state.");
+        const bool before=[state isEqual:@"1"];
+        NSString* name=CFBridgingRelease(get<CFStringRef>(id,patch::DeviceNameProperty));
+        if(!name.length)name=@(c.uid.c_str());
+        if(available && !before) {
+            patch::ClockReader clock;patch::ClockSample sample;
+            if(!engine || !engine->memory->data->active.load() || !clock.read(*engine->memory->data,sample))
+                throw std::runtime_error("Waiting for the hardware clock before publishing the StudioPatch device.");
+        }
+        if(before!=available) {
+            authorizeWrites();
+            CFStringRef value=available?CFSTR("1"):CFSTR("0");
+            check(AudioObjectSetPropertyData(id,&a,0,nullptr,sizeof(value),&value),"Change StudioPatch device availability");
+            pendingUID=c.uid;pendingAvailable=available;
+        }
+        if(!available)configurationChange.pending.clear();
+        // Host property notifications are asynchronous. Confirm the public HAL
+        // list before telling the user that the device has gone/returned.
+        bool confirmed=false;
+        for(int attempt=0;attempt<100;++attempt) {
+            auto devices=list<AudioDeviceID>(kAudioObjectSystemObject,kAudioHardwarePropertyDevices);
+            auto device=translate(@(c.uid.c_str()));
+            bool listed=device && std::find(devices.begin(),devices.end(),device)!=devices.end();
+            confirmed=available ? listed && get<UInt32>(device,kAudioDevicePropertyDeviceIsAlive) : !listed;
+            if(confirmed)break;
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        }
+        if(!confirmed)throw std::runtime_error("Core Audio has not confirmed the StudioPatch device's availability.");
+        const bool changed=pendingUID==c.uid && pendingAvailable==available;
+        pendingUID.clear();
+        return response(@{@"changed":@(changed),@"uid":@(c.uid.c_str()),@"deviceName":name});
+    } catch(const std::exception& e) { return failure(e); }
 } }
 extern "C" char* SPStart(const char* raw) { @autoreleasepool {
     std::lock_guard lock(control);
@@ -659,8 +457,7 @@ extern "C" char* SPStatus() { @autoreleasepool {
         NSMutableArray* deviceTiming=[NSMutableArray array];uint32_t masterIn=0,masterOut=0;
         for(auto& d:engine->devices)if(d->master){masterIn=d->physicalInputLatency;masterOut=d->physicalOutputLatency;}
         for(auto& d:engine->devices)[deviceTiming addObject:@{@"deviceID":@(d->physical),@"master":@(d->master),
-            @"clockSkewFrames":@(d->clockSkew.load()),@"mutedClockFault":@(d->clockFault.load()),
-            @"peakClockSkewFrames":@(d->peakClockSkew.load()),@"faultClockSkewFrames":@(d->faultClockSkew.load()),
+            @"clockSkewFrames":@(d->clockSkew.load()),@"peakClockSkewFrames":@(d->peakClockSkew.load()),
             @"inputSkewFrames":@(int64_t(d->physicalInputLatency)+d->extraInput-masterIn),
             @"outputSkewFrames":@(int64_t(d->physicalOutputLatency)+d->extraOutput-masterOut)}];
         auto values=@{@"devices":deviceTiming,@"transport":@"direct shared memory",@"timingEnabled":@(state.timingEnabled),@"routingUpdates":@(engine->routingUpdates.load()),@"generation":@(engine->generation),@"rate":@(state.rate),@"readPhase":phase(state.readPhase),@"writePhase":phase(state.writePhase),
@@ -668,17 +465,29 @@ extern "C" char* SPStatus() { @autoreleasepool {
             @"captureMarginReads":@(state.captureMargin.reads.load()),@"playbackMarginReads":@(state.playbackMargin.reads.load()),
             @"captureMarginMinTicks":@(state.captureMargin.minimumTicks.load()),@"playbackMarginMinTicks":@(state.playbackMargin.minimumTicks.load()),
             @"capturePublicationUnmatched":@(state.captureMargin.unmatched.load()),@"playbackPublicationUnmatched":@(state.playbackMargin.unmatched.load()),
-            @"serviceCycle":observation(state.serviceCycle),@"readCycle":observation(state.readCycle),@"writeCycle":observation(state.writeCycle),@"bufferFrames":@(engine->actualBuffer),
-            @"inputPadding":@(state.inputPadding),@"outputPadding":@(state.padding),@"captureMisses":@(state.captureMisses.load()),
+            @"serviceCycle":observation(state.serviceCycle),@"readCycle":observation(state.readCycle),@"writeCycle":observation(state.writeCycle),@"bufferFrames":@(engine->actualBuffer.load()),
+            @"inputPadding":@(state.inputPadding.load()),@"outputPadding":@(state.padding.load()),@"captureMisses":@(state.captureMisses.load()),
             @"playbackMisses":@(state.playbackMisses.load()),@"reportedLatency":stringProperty(pluginID(),patch::LatencyProperty),
             @"inputSafety":@(engine->masterInputSafety),@"outputSafety":@(engine->masterOutputSafety)};
         diagnostics=[[NSString alloc] initWithData:[NSJSONSerialization dataWithJSONObject:values options:0 error:nil] encoding:NSUTF8StringEncoding];
     }catch(const std::exception& e){diagnostics=[@"unavailable: " stringByAppendingString:@(e.what())];}
-    return response(@{@"running":@(engine!=nullptr),@"invalidated":@(engine && engine->invalidated.load()),
+    NSMutableArray* warnings=[NSMutableArray array];
+    if(engine) {
+        for(auto& warning:engine->deviceWarnings)[warnings addObject:@(warning.c_str())];
+        if(!engine->routeWarning.empty())[warnings addObject:@(engine->routeWarning.c_str())];
+    }
+    return response(@{@"running":@(engine!=nullptr),@"stale":@(engine && engine->stale()),@"warnings":warnings,
         @"cycles":@(engine?engine->cycles.load():0),@"badBuffers":@(engine?engine->badBuffers.load():0),
-        @"latencyDiagnostics":diagnostics ?: @"unavailable",@"bufferFrames":@(engine?engine->actualBuffer:0)});
+        @"latencyDiagnostics":diagnostics ?: @"unavailable",@"bufferFrames":@(engine?engine->actualBuffer.load():0)});
 } }
 extern "C" void SPStop() { std::lock_guard lock(control); engine.reset(); }
+// Reported latency follows the hardware while audio runs; a change is not a
+// reason to rebuild the graph.
+extern "C" char* SPPublishLatency() { @autoreleasepool {
+    std::lock_guard lock(control);
+    try { if(engine)engine->publishLatency(); return response(@{@"ok":@YES}); }
+    catch(const std::exception& e) { return failure(e); }
+} }
 extern "C" void SPFree(char* s) { free(s); }
 
 extern "C" char* SPRuntimeRates(const char* raw) { @autoreleasepool {
@@ -710,39 +519,55 @@ extern "C" char* SPRuntimeRates(const char* raw) { @autoreleasepool {
         return response(@{@"requested":@(requested),@"masterRate":@(get<Float64>(master,kAudioDevicePropertyNominalSampleRate))});
     } catch(const std::exception& e) { return failure(e); }
 } }
+// Locked members follow the rate the Sync Source actually reaches. A member
+// that cannot follow is reported and left at its own rate; whether that sound
+// is usable is the user's decision. Unlocked members are never changed.
 extern "C" char* SPSetHardwareRate(const char* raw) { @autoreleasepool {
     std::lock_guard lock(control);
     try {
-        engine.reset();
-        auto d=json(raw); auto target=[d[@"sampleRate"] doubleValue];
-        auto master=translate(d[@"masterUID"]);
-        std::vector<AudioDeviceID> members;
+        auto d=json(raw);
+        NSString* masterUID=d[@"masterUID"];
+        auto master=[masterUID isKindOfClass:NSString.class]?translate(masterUID):0;
+        if(!master) throw std::runtime_error("The Sync Source is unavailable.");
+        NSMutableArray* warnings=[NSMutableArray array];
+        bool wroteSyncSource=false;
+        auto follow=[&](AudioDeviceID id,double target) {
+            std::string name=stringProperty(id,kAudioObjectPropertyName).UTF8String ?: "";
+            const auto rate=std::to_string(std::llround(target))+" Hz";
+            try {
+                auto before=get<Float64>(id,kAudioDevicePropertyNominalSampleRate);
+                if(patch::sameRate(before,target))return;
+                auto ranges=list<AudioValueRange>(id,kAudioDevicePropertyAvailableNominalSampleRates);
+                if(std::none_of(ranges.begin(),ranges.end(),[&](auto r){return target>=r.mMinimum && target<=r.mMaximum;}))
+                    throw std::runtime_error("does not support "+rate);
+                auto a=address(kAudioDevicePropertyNominalSampleRate);
+                check(AudioObjectSetPropertyData(id,&a,0,nullptr,sizeof(target),&target),"rejected "+rate);
+                if(id==master)wroteSyncSource=true;
+                for(int i=0;i<80 && !patch::sameRate(get<Float64>(id,kAudioDevicePropertyNominalSampleRate),target);++i)
+                    std::this_thread::sleep_for(std::chrono::milliseconds(25));
+                if(!patch::sameRate(get<Float64>(id,kAudioDevicePropertyNominalSampleRate),target))throw std::runtime_error("did not confirm "+rate);
+            } catch(const std::exception& error) {
+                [warnings addObject:[NSString stringWithFormat:@"%s %s.",name.empty()?"An interface":name.c_str(),error.what()]];
+            }
+        };
+        follow(master,[d[@"sampleRate"] doubleValue]);
+        // The caller may undo only a Sync Source write made by this call.
+        NSMutableDictionary* result=[@{@"warnings":warnings,@"wroteSyncSource":@(wroteSyncSource)} mutableCopy];
+        // Only a confirmed rate is reported. An unreadable Sync Source leaves the
+        // rate unknown, and locked members are not steered by a guess.
+        double rate=0;
+        try { rate=get<Float64>(master,kAudioDevicePropertyNominalSampleRate); }
+        catch(const std::exception& error) {
+            [warnings addObject:[NSString stringWithFormat:@"The Sync Source rate could not be read: %s.",error.what()]];
+            return response(result);
+        }
         for(NSDictionary* m in d[@"devices"]) {
-            auto id=translate(m[@"uid"]); if(!id) throw std::runtime_error("A selected audio interface is missing.");
-            if(id!=master && ![m[@"syncLocked"] boolValue]) continue;
-            auto ranges=list<AudioValueRange>(id,kAudioDevicePropertyAvailableNominalSampleRates);
-            if(std::none_of(ranges.begin(),ranges.end(),[&](auto r){return target>=r.mMinimum && target<=r.mMaximum;}))
-                throw std::runtime_error(std::string(stringProperty(id,kAudioObjectPropertyName).UTF8String)+" does not support the selected sample rate.");
-            members.push_back(id);
+            NSString* uid=m[@"uid"];
+            if(![m[@"syncLocked"] boolValue] || ![uid isKindOfClass:NSString.class] || [uid isEqual:masterUID])continue;
+            try { if(auto id=translate(uid))follow(id,rate); }
+            catch(const std::exception& error) { [warnings addObject:[NSString stringWithFormat:@"%@ could not be checked: %s.",uid,error.what()]]; }
         }
-        if(std::find(members.begin(),members.end(),master)==members.end()) throw std::runtime_error("Choose a sync source from the selected interfaces.");
-        std::stable_sort(members.begin(),members.end(),[&](auto a,auto b){return a==master && b!=master;});
-        for(auto id:members) {
-            if(patch::sameRate(get<Float64>(id,kAudioDevicePropertyNominalSampleRate),target)) continue;
-            auto a=address(kAudioDevicePropertyNominalSampleRate);
-            check(AudioObjectSetPropertyData(id,&a,0,nullptr,sizeof(target),&target),"The interface rejected the sample rate change");
-            for(int i=0;i<80 && !patch::sameRate(get<Float64>(id,kAudioDevicePropertyNominalSampleRate),target);++i)
-                std::this_thread::sleep_for(std::chrono::milliseconds(25));
-            if(!patch::sameRate(get<Float64>(id,kAudioDevicePropertyNominalSampleRate),target)) throw std::runtime_error("The interface did not confirm the sample rate change.");
-        }
-        // A non-following slave may still track the master through its digital clock.
-        // Verify before starting the aggregate; never write to an unlocked device.
-        for(NSDictionary* m in d[@"devices"]) {
-            auto id=translate(m[@"uid"]);
-            if(!patch::sameRate(get<Float64>(id,kAudioDevicePropertyNominalSampleRate),target))
-                throw std::runtime_error(std::string(stringProperty(id,kAudioObjectPropertyName).UTF8String)+" has a different sample rate. Lock its sample rate sync or change the interface's sample rate manually.");
-        }
-        return response(@{@"ok":@YES});
+        result[@"rate"]=@(rate);return response(result);
     } catch(const std::exception& e) { return failure(e); }
 } }
 extern "C" char* SPAcknowledgeRate(const char* raw) { @autoreleasepool {

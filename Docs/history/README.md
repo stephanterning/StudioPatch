@@ -17,5 +17,9 @@ Paths such as `work/…` and `/tmp/…` refer to raw evidence (captures, logs, b
 | [REVIEW-ACTIONS-2026-10-23.md](REVIEW-ACTIONS-2026-10-23.md) | Closure of the architecture review: all 19 findings (C1–L4) and their dispositions. |
 | [REVIEW-HISTORY-2026-10-23.md](REVIEW-HISTORY-2026-10-23.md) | Full chronological evidence behind the architecture review, including failed runs. |
 | [LATENCY-BASELINE-SHA256.txt](LATENCY-BASELINE-SHA256.txt) | Source checksums for the reviewed latency baseline. |
+| [AUDIO-STOP-REVIEW-2026-10-26.md](AUDIO-STOP-REVIEW-2026-10-26.md) | Second review of automatic audio stops, owner decisions, implementation and trade-offs; hand-over for review. |
+| [AUDIO-STOP-HANDOVER-2026-10-27.md](AUDIO-STOP-HANDOVER-2026-10-27.md) | Five remaining findings in `f8b64d0`, evidence levels, reproducible isolated fixtures, and their resolution. |
+
+| [AUDIO-CHANGE-IMPLEMENTATION-2026-10-27.md](AUDIO-CHANGE-IMPLEMENTATION-2026-10-27.md) | Follow-up to `74cef6e`: keep the engine through HAL configuration, confirmed-rate restoration, actual callback padding, tests and review risks. |
 
 The README before the documentation restructuring (with the full historical feature notes) is available in git history at commit `8e55e66`.

@@ -16,6 +16,7 @@ constexpr uint32_t DeviceNameProperty = 0x7370646e; // spdn
 constexpr uint32_t TransportStatusProperty = 0x73707473; // spts
 constexpr uint32_t StatsProperty = 0x73707374; // spst
 constexpr uint32_t ReadyProperty = 0x73707264; // sprd
+constexpr uint32_t AvailableProperty = 0x73706176; // spav: published in Core Audio
 constexpr uint32_t RatesProperty = 0x73707274; // sprt
 constexpr uint32_t RateRequestProperty = 0x73707271; // sprq
 constexpr uint32_t MaxChannels = 128;

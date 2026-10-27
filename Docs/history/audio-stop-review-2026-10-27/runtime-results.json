@@ -1,0 +1,26 @@
+[
+  {
+    "case": "broker-failure-before-change",
+    "counts": {
+      "start": 1,
+      "stop": 1,
+      "rate": 5,
+      "configure": 1
+    },
+    "available": "1",
+    "state": "Audio is off \u00b7 Simulated broker unavailable",
+    "applied_hardware_change": false
+  },
+  {
+    "case": "rate-after-restore",
+    "reported_rate": 48000,
+    "actual_running_rate": 96000,
+    "counts": {
+      "start": 2,
+      "stop": 1,
+      "rate": 2,
+      "configure": 2
+    },
+    "state": "Routing active \u00b7 64 samples I/O \u00b7 0 buffer errors \u00b7 Requested change not applied: Simulated rate control failure The previous configuration remains active."
+  }
+]

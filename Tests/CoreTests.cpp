@@ -108,13 +108,15 @@ static void testPresetIdentity() {
     auto a=Config::parse("2 2 3 96000 256 se.studiopatch.preset.a");
     assert(Config::parse(a.encode()).uid==a.uid);
     assert(plugin->configure(a,false)==noErr);
-    auto first=plugin->GetDeviceByIndex(0);
+    assert(!plugin->GetDeviceByID(plugin->GetDeviceIDByUID(a.uid)));
+    assert(plugin->setAvailable(true)==noErr);
+    auto first=plugin->GetDeviceByID(plugin->GetDeviceIDByUID(a.uid));
     assert(first->GetDeviceUID()==a.uid);
     assert(plugin->setNames(ChannelNames{{"A","B"},{"C","D","E"}},false)==noErr);
     AudioObjectPropertyAddress address{DeviceNameProperty,kAudioObjectPropertyScopeGlobal,0};
     CFStringRef name=CFSTR("StudioPatch (Studio A)");
     assert(plugin->SetPropertyData(plugin->GetID(),0,&address,0,nullptr,sizeof(name),&name)==noErr);
-    assert(plugin->GetDeviceByIndex(0)->GetID()==first->GetID());
+    assert(plugin->GetDeviceByID(plugin->GetDeviceIDByUID(a.uid))->GetID()==first->GetID());
     assert(first->GetName()=="StudioPatch (Studio A)");
     assert(first->GetDeviceUID()==a.uid && readName(first,true,1)=="A");
     // Keep an old client alive through a UID switch: it must be retired/muted.
@@ -122,17 +124,23 @@ static void testPresetIdentity() {
     assert(oldHandler->OnStartIO()==noErr);
     auto b=a;b.uid="se.studiopatch.preset.b";
     assert(plugin->configure(b,false)==noErr);
-    auto second=plugin->GetDeviceByIndex(0);
+    assert(!plugin->GetDeviceByID(first->GetID()));
+    assert(!plugin->GetDeviceByID(plugin->GetDeviceIDByUID(b.uid)));
+    assert(plugin->setAvailable(true)==noErr);
+    auto second=plugin->GetDeviceByID(plugin->GetDeviceIDByUID(b.uid));
     assert(second->GetID()!=first->GetID() && second->GetDeviceUID()==b.uid);
     assert(!first->GetIsAlive() && oldHandler->OnStartIO()!=noErr);
     oldHandler->OnStopIO();
     assert(readName(second,true,1)=="To Computer 1"); // No default-name bleed.
     assert(plugin->configure(a,false)==noErr);
-    assert(plugin->GetDeviceByIndex(0)->GetDeviceUID()==a.uid);
+    assert(!plugin->GetDeviceByID(plugin->GetDeviceIDByUID(a.uid)));
+    assert(plugin->setAvailable(true)==noErr);
+    assert(plugin->GetDeviceByID(plugin->GetDeviceIDByUID(a.uid))->GetDeviceUID()==a.uid);
     auto restoredContext=std::make_shared<aspl::Context>(std::make_shared<aspl::Tracer>(aspl::Tracer::Mode::Noop));
     auto restored=std::make_shared<PatchPlugin>(restoredContext);
     assert(restored->restoreConfiguration(Config::parse(a.encode()))==noErr);
-    assert(restored->GetDeviceByIndex(0)->GetDeviceUID()==a.uid);
+    assert(restored->setAvailable(true)==noErr);
+    assert(restored->GetDeviceByID(restored->GetDeviceIDByUID(a.uid))->GetDeviceUID()==a.uid);
     for(auto raw:{"2 2 3 96000 256 hardware.uid","2 2 3 96000 256 se.studiopatch.preset.a extra"}) {
         bool failed=false;try{Config::parse(raw);}catch(...){failed=true;}assert(failed);
     }
@@ -202,7 +210,7 @@ static void testLiveConfiguration() {
     auto context=std::make_shared<aspl::Context>(std::make_shared<aspl::Tracer>(aspl::Tracer::Mode::Noop));
     auto plugin=std::make_shared<PatchPlugin>(context);
     const auto properties=plugin->GetCustomProperties();
-    for(auto selector:{ConfigProperty,NamesProperty,StatsProperty,RatesProperty,RateRequestProperty,ReadyProperty}) {
+    for(auto selector:{AvailableProperty,ConfigProperty,NamesProperty,StatsProperty,RatesProperty,RateRequestProperty,ReadyProperty}) {
         assert(std::any_of(properties.begin(),properties.end(),[&](const auto& p) {
             return p.mSelector==selector && p.mPropertyDataType==kAudioServerPlugInCustomPropertyDataTypeCFString;
         }));
@@ -236,6 +244,19 @@ static void testLiveConfiguration() {
     CFStringRef value=nullptr; UInt32 bytes=0;
     assert(plugin->GetPropertyData(plugin->GetID(),0,&a,0,nullptr,sizeof(value),&bytes,&value)==noErr);
     assert(CFStringGetDoubleValue(value)==192000); CFRelease(value);
+    // A client request alone must not silence the running session.
+    AudioObjectPropertyAddress readyAddress{ReadyProperty,kAudioObjectPropertyScopeGlobal,0};
+    assert(plugin->GetPropertyData(plugin->GetID(),0,&readyAddress,0,nullptr,sizeof(value),&bytes,&value)==noErr);
+    assert(CFStringGetIntValue(value)==1); CFRelease(value);
+    // The device and its streams keep reporting the running rate until the
+    // service applies a configuration; a refused request must not leave the
+    // client believing the new rate took effect.
+    assert(device->GetNominalSampleRate()==96000);
+    auto streamFormat=input->GetPhysicalFormat();streamFormat.mSampleRate=48000;
+    assert(input->SetPhysicalFormatAsync(streamFormat)==noErr);
+    assert(input->GetPhysicalFormat().mSampleRate==96000 && device->GetNominalSampleRate()==96000);
+    assert(plugin->GetPropertyData(plugin->GetID(),0,&a,0,nullptr,sizeof(value),&bytes,&value)==noErr);
+    assert(CFStringGetDoubleValue(value)==48000); CFRelease(value);
     assert(plugin->configure(Config::parse("1 1 0 192000 64"),false)==noErr);
     assert(plugin->GetDeviceByIndex(0)->GetID()==id);
     assert(device->GetNominalSampleRate()==192000);
@@ -273,10 +294,48 @@ static void testInitializeAndRejectedChanges() {
     assert(plugin->configure(Config::parse("1 3 2 96000 64"),false)==noErr);
     aspl::DrainHostCallbacksForTesting(); aspl::DrainHostCallbacksForTesting();
     assert(requests.load()==2);
-    // Rejection must release the pending flag, allowing a future retry.
+    // Rejection must release the pending flag, allowing a future retry, and
+    // leave the previous configuration usable.
+    assert(plugin->GetPropertyData(plugin->GetID(),0,&a,0,nullptr,sizeof(v),&size,&v)==noErr);
+    assert(CFStringGetIntValue(v)==1); CFRelease(v);
     assert(plugin->configure(Config::parse("1 2 2 96000 64"),false)==noErr);
     aspl::DrainHostCallbacksForTesting(); aspl::DrainHostCallbacksForTesting();
     assert(requests.load()==4);
+    context->Host=nullptr;
+}
+
+// A queued HAL change must not block withdrawal after physical disconnection.
+static void testWithdrawPendingConfiguration() {
+    using namespace patch;
+    auto context=std::make_shared<aspl::Context>(std::make_shared<aspl::Tracer>(aspl::Tracer::Mode::Noop));
+    auto plugin=std::make_shared<PatchPlugin>(context);
+    assert(plugin->configure(Config::parse("1 2 2 96000 256"),false)==noErr);
+    auto front=plugin->GetDeviceByIndex(0),back=plugin->GetDeviceByIndex(1);
+    static std::vector<std::tuple<AudioObjectID,UInt64,void*>> held;held.clear();
+    AudioServerPlugInHostInterface host{};
+    host.PropertiesChanged=[](AudioServerPlugInHostRef,AudioObjectID,UInt32,const AudioObjectPropertyAddress*)->OSStatus{return noErr;};
+    host.RequestDeviceConfigurationChange=[](AudioServerPlugInHostRef,AudioObjectID id,UInt64 action,void* info)->OSStatus {
+        held.emplace_back(id,action,info);return noErr;
+    };
+    context->Host=&host;
+    assert(plugin->configure(Config::parse("1 3 2 96000 64"),false)==noErr);
+    aspl::DrainHostCallbacksForTesting();assert(held.size()==2);
+    // Old handlers still deliver samples while HAL has not applied the change.
+    auto output=front->GetStreamByID(front->GetStreamIDs(kAudioObjectPropertyScopeOutput)[0]);
+    auto input=back->GetStreamByID(back->GetStreamIDs(kAudioObjectPropertyScopeInput)[0]);
+    float written[2]{0.25f,0.5f},read[4]{};
+    front->GetIOHandler()->OnWriteMixedOutput(output,0,100,written,sizeof(written));
+    back->GetIOHandler()->OnReadClientInput(nullptr,input,0,356,read,sizeof(read));
+    assert(read[0]==written[0] && read[1]==written[1]);
+    assert(plugin->setAvailable(false)==noErr && !front->GetIsAlive());
+    assert(!plugin->GetDeviceByID(front->GetID()));
+    // Late HAL completion must not make the withdrawn endpoint selectable.
+    for(auto [id,action,info]:held) {
+        auto device=id==front->GetID()?front:back;
+        assert(device->PerformConfigurationChange(id,action,info)==noErr);
+    }
+    aspl::DrainHostCallbacksForTesting();
+    assert(!plugin->GetDeviceByID(front->GetID()) && !front->GetIsAlive());
     context->Host=nullptr;
 }
 
@@ -345,6 +404,74 @@ static void testInitializeDoesNotNotifyUnpublishedGraph() {
     ctx->Host=nullptr;
 }
 
+static void testDeviceAvailability() {
+    using namespace patch;
+    auto ctx=std::make_shared<aspl::Context>(std::make_shared<aspl::Tracer>(aspl::Tracer::Mode::Noop));
+    auto plugin=std::make_shared<PatchPlugin>(ctx);
+    auto config=Config::parse("2 2 2 96000 256 se.studiopatch.preset.availability");
+    assert(plugin->configure(config,false)==noErr);
+    assert(plugin->setAvailable(true)==noErr);
+    auto old=plugin->GetDeviceByID(plugin->GetDeviceIDByUID(config.uid));
+    auto handler=old->GetControlHandler();assert(old->StartIO(old->GetID(),1)==noErr);
+    assert(plugin->setNames(ChannelNames{{"Mic","Line"},{"L","R"}},false)==noErr);
+    plugin->restoreName("StudioPatch (Availability)");
+    AudioObjectPropertyAddress property{AvailableProperty,kAudioObjectPropertyScopeGlobal,0};
+    auto set=[&](CFStringRef text){return plugin->SetPropertyData(plugin->GetID(),0,&property,0,nullptr,sizeof(text),&text);};
+    assert(set(CFSTR("invalid"))!=noErr);
+    static std::vector<std::pair<AudioObjectID,UInt32>> changes;changes.clear();
+    AudioServerPlugInHostInterface host{};
+    host.PropertiesChanged=[](AudioServerPlugInHostRef,AudioObjectID id,UInt32 count,const AudioObjectPropertyAddress* addresses)->OSStatus {
+        for(UInt32 i=0;i<count;++i)changes.emplace_back(id,addresses[i].mSelector);
+        return noErr;
+    };
+    host.RequestDeviceConfigurationChange=[](AudioServerPlugInHostRef,AudioObjectID,UInt64,void*)->OSStatus {
+        assert(false && "Unpublished device must configure synchronously");return kAudioHardwareIllegalOperationError;
+    };
+    ctx->Host=&host;
+    assert(set(CFSTR("0"))==noErr);
+    aspl::DrainHostCallbacksForTesting();
+    assert(std::count(changes.begin(),changes.end(),std::make_pair(old->GetID(),UInt32(kAudioDevicePropertyDeviceIsAlive)))==1);
+    assert(std::count(changes.begin(),changes.end(),std::make_pair(plugin->GetID(),UInt32(kAudioPlugInPropertyDeviceList)))==1);
+    assert(!plugin->GetDeviceByID(plugin->GetDeviceIDByUID(config.uid)) && !old->GetIsAlive());
+    assert(handler->OnStartIO()!=noErr);
+    assert(old->StartIO(old->GetID(),2)!=noErr); // Reject additional stale clients too.
+    assert(old->StopIO(old->GetID(),1)==noErr);
+    // In-flight reads from retired clients return silence.
+    auto stream=old->GetStreamByID(old->GetStreamIDs(kAudioObjectPropertyScopeInput)[0]);
+    float samples[]{1,1};old->GetIOHandler()->OnReadClientInput(nullptr,stream,0,0,samples,sizeof(samples));
+    assert(samples[0]==0 && samples[1]==0);
+    assert(set(CFSTR("0"))==noErr && set(CFSTR("1"))!=noErr);
+    // The driver stays controllable while absent, with no HAL configuration
+    // callback needed to prepare the new endpoint and its timing.
+    assert(plugin->configure(config,false)==noErr);
+    assert(!plugin->GetDeviceByID(plugin->GetDeviceIDByUID(config.uid)));
+    auto read=[&](UInt32 selector) {
+        AudioObjectPropertyAddress a{selector,kAudioObjectPropertyScopeGlobal,0};
+        CFStringRef value=nullptr;UInt32 bytes=0;char text[512];
+        assert(plugin->GetPropertyData(plugin->GetID(),0,&a,0,nullptr,sizeof(value),&bytes,&value)==noErr);
+        assert(CFStringGetCString(value,text,sizeof(text),kCFStringEncodingUTF8));CFRelease(value);
+        return std::string(text);
+    };
+    assert(read(AvailableProperty)=="0");
+    uint64_t generation=0;std::istringstream(read(TimingProperty))>>generation;
+    auto timing=std::to_string(generation)+" 128 256 32 64";
+    CFStringRef value=CFStringCreateWithCString(nullptr,timing.c_str(),kCFStringEncodingUTF8);
+    AudioObjectPropertyAddress latency{LatencyProperty,kAudioObjectPropertyScopeGlobal,0};
+    assert(plugin->SetPropertyData(plugin->GetID(),0,&latency,0,nullptr,sizeof(value),&value)==noErr);CFRelease(value);
+    assert(read(LatencyProperty)=="128 256 32 64");
+    assert(set(CFSTR("1"))==noErr && read(AvailableProperty)=="1");
+    auto back=plugin->GetDeviceByID(plugin->GetDeviceIDByUID(config.uid));
+    assert(back && back->GetID()!=old->GetID() && back->GetIsAlive());
+    assert(back->GetName()=="StudioPatch (Availability)" && readName(back,true,1)=="Mic");
+    auto id=back->GetID();assert(set(CFSTR("1"))==noErr && plugin->GetDeviceByID(plugin->GetDeviceIDByUID(config.uid))->GetID()==id);
+    assert(set(CFSTR("0"))==noErr);
+    config.uid="se.studiopatch.preset.other";
+    assert(plugin->configure(config,false)==noErr && !plugin->GetDeviceByID(plugin->GetDeviceIDByUID(config.uid)));
+    assert(set(CFSTR("1"))==noErr);
+    assert(readName(plugin->GetDeviceByID(plugin->GetDeviceIDByUID(config.uid)),true,1)=="To Computer 1");
+    aspl::DrainHostCallbacksForTesting();ctx->Host=nullptr;
+}
+
 static void testIndependentLifecycle() {
     struct SlowControl final:aspl::ControlRequestHandler {
         std::promise<void> entered,release;
@@ -364,19 +491,52 @@ static void testIndependentLifecycle() {
     assert(device->StopIO(device->GetID(),1)!=noErr);
 }
 
+static void testDirectTimestampAgeDoesNotMute() {
+    using namespace patch;
+    auto mapping=std::make_shared<SharedMapping>();mapping->size=sizeof(SharedTransport);
+    auto region=mmap(nullptr,mapping->size,PROT_READ|PROT_WRITE,MAP_ANON|MAP_SHARED,-1,0);
+    assert(region!=MAP_FAILED);mapping->data=new(region) SharedTransport;
+    auto& shared=*mapping->data;shared.active=1;shared.rate=96000;shared.inputPadding=32;
+    auto session=std::make_shared<Session>(Config::parse("1 2 2 96000 64"),true,[mapping]{return mapping;});
+    for(int i=0;i<1000 && !session->direct;++i)std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    assert(session->direct);
+    Handler front(session,false);
+    float sent[]{.25f,-.5f,.75f,-1.0f},received[4]{};
+    // Delayed or future host timestamps cannot discard matching audio frames.
+    for(auto host:{uint64_t(1),UINT64_MAX/2}) {
+        shared.publishClock({100,250,host,0});
+        for(uint32_t n=0;n<2;++n)for(uint32_t c=0;c<2;++c)shared.capture.write(c,100+n,sent[n*2+c]);
+        front.OnReadClientInput({},nullptr,0,132,received,sizeof(received));
+        assert(std::memcmp(sent,received,sizeof(sent))==0);
+        front.OnWriteMixedOutput(nullptr,0,200,sent,sizeof(sent));
+        for(uint32_t n=0;n<2;++n)for(uint32_t c=0;c<2;++c)assert(shared.playback.read(c,200+n)==sent[n*2+c]);
+    }
+    // Missing frames still read as silence, with no replay of old audio.
+    front.OnReadClientInput({},nullptr,0,500,received,sizeof(received));
+    for(float value:received)assert(value==0);
+    shared.active=0;
+    front.OnReadClientInput({},nullptr,0,132,received,sizeof(received));
+    for(float value:received)assert(value==0);
+    front.OnWriteMixedOutput(nullptr,0,300,sent,sizeof(sent));
+    assert(shared.playback.read(0,300)==0);
+}
+
 int main() {
+    testDirectTimestampAgeDoesNotMute();
     testPresetIdentity();
+    testDeviceAvailability();
     assert(patch::supportedSampleRate(8000) && patch::supportedSampleRate(192000) && patch::supportedSampleRate(384000));
     assert(!patch::supportedSampleRate(7999) && !patch::supportedSampleRate(384001) && !patch::supportedSampleRate(48000.5));
     assert(!patch::supportedSampleRate(NAN) && !patch::supportedSampleRate(INFINITY));
     {
-        auto direct=patch::makeDriver();auto plugin=direct->GetPlugin();assert(plugin->GetDeviceCount()==1);
+        auto direct=patch::makeDriver();auto plugin=direct->GetPlugin();assert(plugin->GetDeviceCount()==0);
         CFStringRef value=CFSTR("0");
-        for(auto key:{patch::DeviceNameProperty,patch::ConfigProperty,patch::NamesProperty,patch::RatesProperty,patch::RateRequestProperty,patch::LatencyProperty}) {
+        for(auto key:{patch::AvailableProperty,patch::DeviceNameProperty,patch::ConfigProperty,patch::NamesProperty,patch::RatesProperty,patch::RateRequestProperty,patch::LatencyProperty}) {
             AudioObjectPropertyAddress a{key,kAudioObjectPropertyScopeGlobal,0};
             for(auto pid:{0,getpid()})assert(plugin->SetPropertyData(plugin->GetID(),pid,&a,0,nullptr,sizeof(value),&value)==kAudioHardwareIllegalOperationError);
         }
     }
+    testWithdrawPendingConfiguration();
     testLatencyReporting();
     testInitializeAndRejectedChanges();
     testLiveConfiguration();

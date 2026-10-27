@@ -11,7 +11,6 @@ struct RuntimeSnapshot: Codable {
     var message: String
     var rate: Int
     var latencyDiagnostics: String? = nil
-    var recoveryStopped: Bool? = nil
 }
 enum RuntimeConnection {
     static let directory:URL = ProcessInfo.processInfo.environment["STUDIOPATCH_TEST_DIRECTORY"].map { URL(fileURLWithPath:$0) } ?? FileManager.default.urls(for:.applicationSupportDirectory,in:.userDomainMask)[0].appendingPathComponent("StudioPatch")
@@ -28,14 +27,14 @@ enum RuntimeConnection {
             }
         }
     }
-    static func notifyFailure(_ message:String) {
-        notify(identifier:"runtime-failure",title:"StudioPatch: audio is muted",body:message)
+    // System notifications report problems only; successful changes are shown
+    // in the panel's status line.
+    static func notifyProblem(_ identifier:String,title:String,body:String) {
+        notify(identifier:identifier,title:"StudioPatch: "+title,body:body)
     }
-    static func notifyFormat(_ format:String, failure:String? = nil) {
-        notify(identifier:failure == nil ? "format-changed" : "format-failed",
-               title:failure == nil ? "StudioPatch: audio format changed" : "StudioPatch: audio format change failed",
-               body:failure.map { "Attempted to set \(format). \($0) Audio is muted; StudioPatch will retry automatically." }
-                    ?? "\(format). Routing is active.")
+    static func notifyDisconnected(_ name:String,reason:String) {
+        notify(identifier:"device-unavailable",title:"StudioPatch: audio interface disconnected",
+               body:"\(name) was removed from Core Audio. \(reason)")
     }
     private static func notify(identifier:String,title:String,body:String) {
         if ProcessInfo.processInfo.environment["STUDIOPATCH_TEST_DIRECTORY"] != nil {
@@ -69,7 +68,8 @@ enum RuntimeConnection {
         }
     }
 
-    static func launch() throws {
+    // A restart replaces the running service process; only launchd can do that.
+    static func launch(restart:Bool=false) throws {
         let agent=FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/LaunchAgents/se.studiopatch.runtime.plist")
         if FileManager.default.fileExists(atPath:agent.path) {
             func launchctl(_ arguments:[String]) throws -> Int32 {
@@ -79,14 +79,19 @@ enum RuntimeConnection {
                 try task.run(); task.waitUntilExit(); return task.terminationStatus
             }
             let domain="gui/\(getuid())",job="\(domain)/se.studiopatch.runtime"
-            if try launchctl(["kickstart",job]) == 0 { return }
+            let kickstart=restart ? ["kickstart","-k",job] : ["kickstart",job]
+            if try launchctl(kickstart) == 0 { return }
             // A configured service must stay owned by launchd. Falling back to
             // Process.run here leaves an orphan that bootout cannot stop and
             // may run a different app build than the configured service.
             _ = try launchctl(["bootstrap",domain,agent.path])
-            if try launchctl(["kickstart",job]) == 0 { return }
+            if try launchctl(kickstart) == 0 { return }
             throw NSError(domain:"StudioPatch",code:23,userInfo:[NSLocalizedDescriptionKey:
                 "The registered background service could not start. Reinstall its launch agent from the matching StudioPatch package."])
+        }
+        guard !restart else {
+            throw NSError(domain:"StudioPatch",code:24,userInfo:[NSLocalizedDescriptionKey:
+                "Restarting needs the registered background service. Install it with Scripts/install-service.sh."])
         }
         let executable=Bundle.main.bundleURL.appendingPathComponent("Contents/MacOS/StudioPatchService")
         let process=Process(); process.executableURL=executable
@@ -95,7 +100,7 @@ enum RuntimeConnection {
     }
     static func read() throws -> RuntimeSnapshot {
         let snapshot=try JSONDecoder().decode(RuntimeSnapshot.self,from:Data(contentsOf:status))
-        guard snapshot.recoveryStopped == true || Date().timeIntervalSince(snapshot.date)<12 else {
+        guard Date().timeIntervalSince(snapshot.date)<12 else {
             throw NSError(domain:"StudioPatch",code:20,userInfo:[NSLocalizedDescriptionKey:"The background engine is not responding. Audio status is unknown."])
         }
         return snapshot

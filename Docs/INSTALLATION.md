@@ -119,7 +119,7 @@ Your configuration and presets in `~/Library/Application Support/StudioPatch/` a
 | No notifications | Allow notifications for StudioPatch in System Settings → Notifications, and check Focus settings. |
 | Build fails at `codesign` | The identity is wrong or its private key is not in your Keychain. See step 1. |
 | Swift build fails inside a sandboxed tool or AI agent | SwiftUI macros and Keychain access need an unsandboxed shell. Run the build in a normal Terminal. |
-| Audio muted, "Audio interfaces unavailable" | A selected interface is disconnected. Reconnect it or remove it from the configuration. |
+| StudioPatch interface unavailable, "Audio interfaces unavailable" | A selected interface is disconnected, so the preset device has been removed from Core Audio. Reconnect every selected interface or remove missing ones from the configuration. |
 
 The panel's status line and `~/Library/Application Support/StudioPatch/runtime-status.json` are the main diagnostics. For system logs from the service and the driver:
 
