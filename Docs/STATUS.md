@@ -1,5 +1,11 @@
 # Project status
 
+## Neutral hardware-sync note — 2026-10-27
+
+Installed in the panel at the owner’s request on 2026-10-27. Selected, available secondary interfaces with Drift correction off show “Drift Correction is off. Hardware sync is not verified by StudioPatch.” This is neutral configuration text, independent of the runtime health, notifications and audio control. No new service state, hardware queries or inferred sync checks were added. There is currently no Core Audio evidence source in StudioPatch that can prove a common hardware clock; all applicable interfaces use the unverified wording. Only a panel update is needed.
+
+Verification: the production SwiftUI panel compiled and linked successfully as `build/sync-note-StudioPatch` (macOS 14 target); `git diff --check` passed. No new automated tests were added for this conditional text. The updated panel was then signed, installed and reopened. The live accessibility view confirms the neutral note beneath ZED with Drift correction off, no such note beneath the UFX Sync Source, and healthy status. The previous app is saved under `build/sync-note-update.ubha2hyf/previous-StudioPatch.app`. Service, driver and broker hashes are unchanged; service PID 5525, broker PID 579, Core Audio PID 613 and driver host PID 662 remained running.
+
 ## Resolved problem notifications — 2026-10-27
 
 Installed at the owner's request on 2026-10-27. Healthy (green) runtime status removes StudioPatch's earlier problem notifications from Notification Center and cancels pending ones. Other statuses retain them. A later recurrence may notify again. Cleanup is limited to known StudioPatch problem identifiers, including notifications from an earlier service process; audio control is unchanged. Live macOS Notification Center removal still needs visual verification.

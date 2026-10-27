@@ -716,6 +716,13 @@ struct ContentView: View {
                                     .font(.caption).foregroundStyle(.secondary)
                                 if let i=m.preset.devices.firstIndex(where:{$0.uid==d.uid}) {
                                     Toggle("Drift correction",isOn:$m.preset.devices[i].drift).font(.caption).disabled(d.uid==m.preset.masterUID || !m.isAvailable(d.uid))
+                                    // Clock source/nominal rate alone cannot verify a shared hardware clock.
+                                    // Keep this configuration note separate from runtime warnings and health.
+                                    if d.uid != m.preset.masterUID && m.isAvailable(d.uid) && !m.preset.devices[i].drift {
+                                        Text("Drift Correction is off. Hardware sync is not verified by StudioPatch.")
+                                            .font(.caption).foregroundStyle(.secondary)
+                                            .fixedSize(horizontal:false,vertical:true)
+                                    }
                                 }
                             }.frame(maxWidth:.infinity,alignment:.leading)
                             Group {
