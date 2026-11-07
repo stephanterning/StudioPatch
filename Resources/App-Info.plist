@@ -9,6 +9,10 @@
 <key>CFBundleVersion</key><string>0.2.0</string>
 <key>CFBundleShortVersionString</key><string>0.2.0</string>
 <key>LSMinimumSystemVersion</key><string>14.0</string>
+<key>CFBundleURLTypes</key><array><dict>
+<key>CFBundleURLName</key><string>se.studiopatch.app.settings</string>
+<key>CFBundleURLSchemes</key><array><string>studiopatch</string></array>
+</dict></array>
 <key>NSMicrophoneUsageDescription</key><string>StudioPatch needs access to your selected audio interfaces to route their inputs to your audio applications.</string>
 <key>NSHighResolutionCapable</key><true/>
 </dict></plist>

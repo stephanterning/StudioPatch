@@ -58,14 +58,41 @@ add_custom_command(OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/session-tests"
         "${CMAKE_CURRENT_SOURCE_DIR}/Sources/RuntimeController.swift"
         "${CMAKE_CURRENT_SOURCE_DIR}/Sources/AbletonLabels.swift"
         "${CMAKE_CURRENT_SOURCE_DIR}/Sources/AbletonToolsView.swift"
+        "${CMAKE_CURRENT_SOURCE_DIR}/Sources/MenuBarController.swift"
         "${CMAKE_CURRENT_SOURCE_DIR}/Sources/App.swift"
         "${CMAKE_CURRENT_SOURCE_DIR}/Tests/SessionTests.swift"
         "$<TARGET_FILE:patchbridge>"
         -framework UserNotifications -framework SwiftUI -framework AppKit -framework Foundation -framework CoreAudio -lc++
         -o "${CMAKE_CURRENT_BINARY_DIR}/session-tests"
-    DEPENDS Sources/Preset.swift Sources/SessionStore.swift Sources/Matrix.swift Sources/MatrixGroups.swift Sources/RuntimeConnection.swift Sources/RuntimeTypes.swift Sources/RuntimeController.swift Sources/App.swift Sources/AbletonLabels.swift Sources/AbletonToolsView.swift Sources/Bridge.h Tests/SessionTests.swift patchbridge VERBATIM)
+    DEPENDS Sources/Preset.swift Sources/SessionStore.swift Sources/Matrix.swift Sources/MatrixGroups.swift Sources/RuntimeConnection.swift Sources/RuntimeTypes.swift Sources/RuntimeController.swift Sources/MenuBarController.swift Sources/App.swift Sources/AbletonLabels.swift Sources/AbletonToolsView.swift Sources/Bridge.h Tests/SessionTests.swift patchbridge VERBATIM)
 add_custom_target(session-tests-build ALL DEPENDS "${CMAKE_CURRENT_BINARY_DIR}/session-tests")
 add_test(NAME session-tests COMMAND "${CMAKE_CURRENT_BINARY_DIR}/session-tests")
+
+add_custom_command(OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/menu-bar-tests"
+    COMMAND "${XCRUN_EXECUTABLE}" swiftc -parse-as-library -swift-version 5
+        -D STUDIOPATCH_MODEL_TESTS
+        -module-cache-path "${CMAKE_CURRENT_BINARY_DIR}/swift-cache"
+        -import-objc-header "${CMAKE_CURRENT_SOURCE_DIR}/Sources/Bridge.h"
+        "${CMAKE_CURRENT_SOURCE_DIR}/Sources/Preset.swift"
+        "${CMAKE_CURRENT_SOURCE_DIR}/Sources/SessionStore.swift"
+        "${CMAKE_CURRENT_SOURCE_DIR}/Sources/Matrix.swift"
+        "${CMAKE_CURRENT_SOURCE_DIR}/Sources/MatrixGroups.swift"
+        "${CMAKE_CURRENT_SOURCE_DIR}/Sources/RuntimeConnection.swift"
+        "${CMAKE_CURRENT_SOURCE_DIR}/Sources/RuntimeTypes.swift"
+        "${CMAKE_CURRENT_SOURCE_DIR}/Sources/RuntimeController.swift"
+        "${CMAKE_CURRENT_SOURCE_DIR}/Sources/AbletonLabels.swift"
+        "${CMAKE_CURRENT_SOURCE_DIR}/Sources/AbletonToolsView.swift"
+        "${CMAKE_CURRENT_SOURCE_DIR}/Sources/MenuBarController.swift"
+        "${CMAKE_CURRENT_SOURCE_DIR}/Sources/App.swift"
+        "${CMAKE_CURRENT_SOURCE_DIR}/Sources/AppShell.swift"
+        "${CMAKE_CURRENT_SOURCE_DIR}/Sources/MenuBarAgent.swift"
+        "${CMAKE_CURRENT_SOURCE_DIR}/Tests/MenuBarTests.swift"
+        "$<TARGET_FILE:patchbridge>"
+        -framework UserNotifications -framework SwiftUI -framework AppKit -framework Foundation -framework CoreAudio -framework ServiceManagement -lc++
+        -o "${CMAKE_CURRENT_BINARY_DIR}/menu-bar-tests"
+    DEPENDS Sources/Preset.swift Sources/SessionStore.swift Sources/Matrix.swift Sources/MatrixGroups.swift Sources/RuntimeConnection.swift Sources/RuntimeTypes.swift Sources/RuntimeController.swift Sources/MenuBarController.swift Sources/App.swift Sources/AppShell.swift Sources/MenuBarAgent.swift Sources/AbletonLabels.swift Sources/AbletonToolsView.swift Sources/Bridge.h Tests/MenuBarTests.swift patchbridge VERBATIM)
+add_custom_target(menu-bar-tests-build ALL DEPENDS "${CMAKE_CURRENT_BINARY_DIR}/menu-bar-tests")
+add_test(NAME menu-bar-tests COMMAND "${CMAKE_CURRENT_BINARY_DIR}/menu-bar-tests")
 
 add_executable(latency-capture Tools/latency-capture.cpp)
 target_link_libraries(latency-capture PRIVATE "-framework CoreAudio" "-framework CoreFoundation")

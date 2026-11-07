@@ -1,5 +1,21 @@
 # Project status
 
+## Regular app and independent menu bar — 2026-11-07
+
+Implemented, signed and activated in `Dist/StudioPatch.app`. StudioPatch is a regular Dock/⌘Tab app with native Quit behavior. A separate signed `StudioPatchMenu.app` login helper owns the status icon; clicking it opens a native menu with **Open StudioPatch**, Settings and audio-service restart. Quitting the main app leaves the menu bar and audio running. The existing icon appearance/spacing and visibility preference are preserved. The old main-app login item is migrated to the helper so login starts only the menu bar.
+
+Verification: all 11 CTest suites passed. The focused menu bar suite passed again after adding the existing-login migration fixture, serialized panel-status relay and settings URL checks. Both production executables compiled for macOS 14 and the packaged nested app passed strict deep signature verification. Live AppKit metadata reports the main app as regular and the helper as accessory. A native Quit request exited main-app PID 6262 while menu bar PID 6267 remained running; reopening created main-app PID 6372 and retained the same menu bar process. A real logout/login remains a manual check.
+
+The previous bundle and preferences are saved under `build/regular-app-update.zl83o6nn/`. The embedded audio-service binary is unchanged. Audio service PID 899, Core Audio PID 588 and driver host PID 632 remained running through the quit/reopen test.
+
+## Menu bar control panel — 2026-11-06
+
+Implemented, signed and activated in `Dist/StudioPatch.app`. The cable logo defaults to a native template image that follows the menu bar appearance, with a smaller colored status dot centered vertically to its right, following the owner's ChatGPT menu bar reference. Settings controls visibility and offers the original turquoise as an alternative. Left-click opens one reusable panel, right-click offers status/settings/service restart, and Command-Q hides the panel/settings while the status item remains. Finder/Spotlight reopen works with the icon hidden. Main-app login registration follows the visibility setting and is separate from the audio service. First presentation requests microphone/notification consent; later login launches keep the panel closed.
+
+Verification: all 11 CTest suites passed, including isolated login-registration/preferences tests and the actual AppKit window/menu shortcut lifecycle. The production app compiled and linked for macOS 14, and the signed bundle passed strict deep signature verification. The settings window and visibility/appearance controls were inspected in a native preview with a fake model and login-item service; no hardware or real login registration was used by that preview. The template flag is checked in the lifecycle test. A spacing follow-up uses AppKit's variable item length and ends the image at the status dot, removing extra trailing space; the existing menu bar test passed again in a GUI session after that adjustment. A real login and changing macOS appearance while the installed app runs remain manual checks.
+
+The original bundle is preserved at `build/menu-bar-update.jj3n2ggb/previous-StudioPatch.app`; the first menu bar build is at `build/menu-bar-appearance-update.7ugxdv55/previous-StudioPatch.app`. The version before the spacing adjustment is at `build/menu-bar-spacing-update._vo8ysce/previous-StudioPatch.app`. Only the panel executable, app metadata and outer bundle signature changed. The app was reopened through the owner-authorized Terminal restart; the final panel PID is 14781. The embedded service hash is unchanged; service PID 1161, Core Audio PID 879 and driver host PID 907 were not restarted. The isolated native preview was stopped after inspection.
+
 ## Neutral hardware-sync note — 2026-10-27
 
 Installed in the panel at the owner’s request on 2026-10-27. Selected, available secondary interfaces with Drift correction off show “Drift Correction is off. Hardware sync is not verified by StudioPatch.” This is neutral configuration text, independent of the runtime health, notifications and audio control. No new service state, hardware queries or inferred sync checks were added. There is currently no Core Audio evidence source in StudioPatch that can prove a common hardware clock; all applicable interfaces use the unverified wording. Only a panel update is needed.

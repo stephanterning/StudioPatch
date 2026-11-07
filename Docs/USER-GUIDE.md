@@ -8,7 +8,7 @@ This guide explains how to use the StudioPatch control panel. It assumes StudioP
 - **To Computer** channels are the virtual device's *inputs*: audio from your interfaces going into the DAW.
 - **From Computer** channels are the virtual device's *outputs*: audio from the DAW going out to your interfaces.
 - The two directions are completely separate. Nothing played on From Computer is looped back to To Computer.
-- The **control panel** (`StudioPatch.app`) only edits the configuration. A **background service** does the actual audio work and keeps running when you close the panel. The service starts at login, and opening the panel starts it if it is not running.
+- The **control panel** (`StudioPatch.app`) edits the configuration and shows audio status in the menu bar. A **background service** does the actual audio work and keeps running when you close the panel. The service starts at login, and StudioPatch starts it if it is not running.
 
 ## The window
 
@@ -32,6 +32,19 @@ Each physical interface has:
 - **Drift correction** (secondary interfaces only). Leave it **off** when the interface is clocked from the Sync Source, for example over ADAT, word clock or MADI. Turn it **on** only for an interface that runs on its own clock; its routes then go through Apple's drift correction, which resamples them and adds some latency. StudioPatch cannot verify an external clock lock for you.
 
 Clearing **Use** on an interface that has routes asks for confirmation. **Remove** deletes the interface and all its routes, including inactive ones; **Cancel** keeps everything.
+
+## Menu bar and settings
+
+StudioPatch is a regular Mac app that appears in the Dock and ⌘Tab. Its separate menu bar app keeps showing audio status after you quit StudioPatch. The icon uses the cable symbol from the StudioPatch logo with a small, vertically centered status dot to its right. The dot mirrors the panel's green, orange, red or gray audio status, including red when the service status is missing or too old. Hover over the icon for the current status message.
+
+- **Click** the icon to open its menu, showing the status message, **Open StudioPatch**, **Settings…** and **Restart Audio Service**. Right-click opens the same menu. Restarting the audio service interrupts audio briefly.
+- Choose **Open StudioPatch** to launch the app or bring its existing control panel forward. You can also switch to the running app through its Dock icon or **⌘Tab**.
+- Closing the window or pressing **⌘W** leaves StudioPatch running in the Dock. **Quit StudioPatch**, **⌘Q** and the Dock's **Quit** command actually quit the app; its separate menu bar and audio service continue running.
+- Open **Settings…** from the panel, the menu bar menu, or **⌘,**. **Show in menu bar** is on by default and registers only the menu bar app to open at login. The StudioPatch control panel stays closed until you open it. Turning the setting off stops the menu bar app and unregisters its login item. The audio service has its own independent login registration.
+- **Use system appearance for logo** is on by default. macOS tints the template symbol for the menu bar's current light/dark appearance and selection state. Turn it off for the original turquoise. The status dot keeps its color in either mode.
+- When the icon is hidden, opening **StudioPatch.app** from Finder or Spotlight always brings back the panel, where you can enable it again.
+
+The first launch shows the panel for microphone and notification permissions. If macOS blocks the menu bar login item, Settings shows its status and a button to open **Login Items**. A later choice to disable it in macOS is respected on subsequent launches.
 
 ## Routing
 

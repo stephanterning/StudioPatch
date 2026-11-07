@@ -8,7 +8,8 @@ StudioPatch consists of four programs that work together:
 
 | Component | Language | Runs as | Responsibility |
 |---|---|---|---|
-| `StudioPatch.app` | Swift / SwiftUI | The logged-in user, only while open | Control panel. Edits the configuration, saves it, and shows status. Closing it does not stop audio. |
+| `StudioPatch.app` | Swift / SwiftUI / AppKit | The logged-in user, until the app is quit | A regular Dock/⌘Tab app with a single control panel. Edits and saves configuration. |
+| `StudioPatchMenu.app` | Swift / AppKit | The logged-in user, independently of the control panel | Bundled login helper showing audio status and a menu for opening StudioPatch, settings or restarting the audio service. Quitting the control panel does not stop it. |
 | `StudioPatchService` | Swift + Objective-C++ | Per-user LaunchAgent `se.studiopatch.runtime` | The audio engine. Owns all physical audio I/O, applies routing and format changes, handles sample-rate requests, and sends notifications about problems. Embedded in the app bundle. |
 | `StudioPatch.driver` | C++ (libASPL) | Inside Apple's `coreaudiod` | AudioServerPlugIn that publishes the virtual device named **StudioPatch** that DAWs see. |
 | `StudioPatchBroker` | C++ | Root LaunchDaemon `se.studiopatch.transport` | Authenticates the service and Core Audio, then hands both of them the same shared-memory region. Never touches audio samples. |
@@ -49,6 +50,16 @@ StudioPatch.app ◄──reads─── runtime-status.json ◄──writes─�
 4. The service writes a timestamped `runtime-status.json`. It includes a structured health level (`idle`, `healthy`, `warning`, `error`) for presentation; this value never controls audio. The panel treats a snapshot older than 12 seconds as "service not responding".
 
 When the panel opens, it starts the registered LaunchAgent (`launchctl kickstart`, bootstrapping it if needed). It never spawns an unmanaged copy of the service when a LaunchAgent is registered. A process lock (`runtime.lock`) guarantees a single engine.
+
+### Menu bar lifecycle
+
+`AppShell.swift` owns the regular AppKit application, one retained `NSHostingView` control-panel window and a settings window. It has a Dock icon, participates in ⌘Tab and uses native termination for Command-Q, the app menu and the Dock's Quit command. Closing the last window leaves the regular app running; clicking its Dock icon opens the same panel again.
+
+`MenuBarAgent.swift` is a separate executable in `Contents/Library/LoginItems/StudioPatchMenu.app`, with its own identifier (`se.studiopatch.menubar`) and `LSUIElement`. It owns the `NSStatusItem` through `MenuBarController.swift` and continues running when the control panel exits. A normal click opens a native menu with status, **Open StudioPatch**, settings and service restart. Opening the panel uses `NSWorkspace`; Settings opens the main app with `studiopatch://settings`. The helper never constructs a `Model`, writes the audio session or queries hardware. It reads the service snapshot using a file observer and a one-second common-mode timer, sharing the panel's health-to-color mapping. While the panel runs, local status warnings are mirrored through distributed notifications; a missing panel process or a relay older than three seconds falls back to the independently read service snapshot. This changes presentation only.
+
+A template logo supplies native light/dark/selection tinting by default. Its image ends at the separate colored dot so AppKit supplies the normal item margins. Turning off system appearance uses the original turquoise; it does not change the dot.
+
+App preferences use the `se.studiopatch.app` UserDefaults domain, independently of the audio session. **Show in menu bar** registers/unregisters `SMAppService.loginItem(identifier:)` for the bundled helper, leaving the existing audio-service LaunchAgent alone. The earlier main-app login registration is removed once during migration. First setup or an explicit preference change configures the helper; subsequent launches respect macOS Login Items choices. Appearance changes notify the helper immediately. Microphone/notification consent requests remain in the visible main app.
 
 ### Driver properties
 
@@ -142,6 +153,8 @@ Physical input and output labels are a separate, panel-owned registry in `source
 | Path | What it contains |
 |---|---|
 | `Sources/App.swift` | SwiftUI control panel and its `Model`: autosave, presets, labels, device order, interface selection. |
+| `Sources/AppShell.swift` | Regular app, panel and settings windows, application menus, preferences and helper login registration/migration. |
+| `Sources/MenuBarController.swift`, `Sources/MenuBarAgent.swift` | Shared status appearance, native status menu and the independent menu bar login helper. |
 | `Sources/Matrix.swift`, `Sources/MatrixGroups.swift` | AppKit matrix, inferred channel banks and collapsed-axis projection. Routing and label actions retain original channel indices; grouped cells only expand. Aggregate counts are derived from existing routes. Fold preferences use UserDefaults independently of audio configuration, keyed by interface UID/direction or virtual preset UID. |
 | `Sources/Preset.swift` | The configuration model, validation, engine payload and retry schedule. Shared by app, service and tests. |
 | `Sources/SessionStore.swift` | Atomic session file, preset library and physical interface label storage. |

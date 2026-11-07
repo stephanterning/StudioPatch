@@ -66,9 +66,13 @@ After the restart:
 2. Select your interfaces, a Sync Source and some routes. See the [user guide](USER-GUIDE.md).
 3. Select **StudioPatch** in your DAW and test input and output separately at a low level.
 
+StudioPatch appears in the Dock and ⌘Tab. Its first launch enables **Show in menu bar** by default, registering the bundled `StudioPatchMenu.app` to open silently at subsequent logins. Click its icon and choose **Open StudioPatch** to launch or return to the control panel. Quitting StudioPatch leaves the menu bar and audio running. Settings controls icon visibility and system/turquoise appearance. The menu bar login item is separate from the audio service installed above. If macOS requires approval, Settings links to **Login Items**. Upgrading from the earlier menu-bar-only version automatically replaces the main app's login item with the separate menu bar helper.
+
 ## Updating
 
 Quit audio applications, rebuild, then reinstall the components that changed. When in doubt, reinstall all three, because the driver, broker and service share a memory layout and must match.
+
+Quit **StudioPatch** normally with ⌘Q before replacing its build. The menu bar stays running independently; when its code changes too, stop **StudioPatchMenu** in Activity Monitor and reopen the rebuilt app. This does not stop **StudioPatchService**.
 
 ```sh
 bash Scripts/build.sh
@@ -79,7 +83,7 @@ bash Scripts/install-service.sh
 
 Restart the Mac if the driver changed. `--replace` moves the previous driver to `/Library/Audio/StudioPatch Backups/`.
 
-If only the app or service changed, rebuilding is enough: restart the service with
+If only the app changed, reopen the updated app; no audio-service restart is needed. If the service changed too, restart it with
 
 ```sh
 launchctl kickstart -k gui/$(id -u)/se.studiopatch.runtime
@@ -89,7 +93,7 @@ launchctl kickstart -k gui/$(id -u)/se.studiopatch.runtime
 
 ## Uninstalling
 
-1. Quit audio applications.
+1. Quit audio applications. In StudioPatch **Settings…**, turn off **Show in menu bar** to stop the menu bar and remove its login item, then quit StudioPatch with ⌘Q.
 2. Stop and remove the background service:
 
    ```sh

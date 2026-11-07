@@ -5,7 +5,7 @@ Thanks for your interest. StudioPatch is a small, experimental project, so quest
 ## Getting oriented
 
 1. Read the [README](README.md) for what StudioPatch does.
-2. Read [Docs/ARCHITECTURE.md](Docs/ARCHITECTURE.md) for how the four components fit together and where things live in the source.
+2. Read [Docs/ARCHITECTURE.md](Docs/ARCHITECTURE.md) for how the components fit together and where things live in the source.
 3. Check [Docs/STATUS.md](Docs/STATUS.md) for what is verified, what is not, and known limitations.
 
 The code base is small: about 4,000 lines of Swift, C++ and Objective-C++ in `Sources/`, plus tests and tools.
@@ -45,6 +45,7 @@ SwiftUI macro expansion and Keychain access do not work inside some sandboxes (i
 | `bridge-fault-tests` | `Tests/BridgeFaultTests.mm` | The real bridge and engine code with simulated HAL reads: secondary lookup failures, an unreadable Sync Source rate, unreadable latency, latency-only changes, actual sample delivery with unknown/changing block lengths and nonshrinking variable-block padding, configuration-write/read/claim failures with one outstanding request, and contained timing confirmation. No Core Audio objects are touched. |
 | `preset-tests` | `Tests/PresetTests.swift` | The configuration model: inactive routes, validation, older file formats, engine payload. |
 | `session-tests` | `Tests/SessionTests.swift` | The real app `Model` with an isolated session file: autosave, restore, labels, unplugged interfaces, removal confirmation, the asynchronous Core Audio worker. |
+| `menu-bar-tests` | `Tests/MenuBarTests.swift` | Isolated login-helper migration and preferences, a native status menu, a regular Dock app with native quit/reopen, and status continuing independently when the panel quits. Includes panel-warning relay and service fallback after quit or stale panel updates. Requires a macOS GUI session; does not query hardware or change real login items. |
 | `matrix-group-tests` | `Tests/MatrixGroupTests.swift` | Inferred banks, nested 16-channel groups, stable IDs, both-axis expansion without routing edits, projected route/label hit mapping, fan-out counts, unavailable routes and isolated fold-preference persistence. |
 | `capture-stream-tests` | `Tests/CaptureStreamTests.cpp` | The streaming writer used by the latency capture tool. |
 | `async-resource-tests` | `Tests/AsyncResourceTests.cpp` | Asynchronous broker acquisition, retry and cancellation. |

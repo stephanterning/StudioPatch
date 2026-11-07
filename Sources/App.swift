@@ -30,14 +30,7 @@ import CoreAudio
     }
     @Published var running = false
     @Published var health:RuntimeHealth = .idle
-    var statusColor:Color {
-        switch health {
-        case .healthy: return .green
-        case .warning: return .orange
-        case .error: return .red
-        case .idle: return .gray
-        }
-    }
+    var statusColor:Color { health.statusColor }
     @Published var message = "Audio latency has not been measured yet"
     @Published var error = ""
     @Published var tab = 0
@@ -424,7 +417,6 @@ import CoreAudio
         do { try RuntimeConnection.launch() } catch { message="Could not start the background engine: \(error.localizedDescription)" }
         readRuntime()
         statusObserver=DirectoryObserver(RuntimeConnection.status) { [weak self] in self?.readRuntime() }
-        RuntimeConnection.requestNotifications()
         timer = Timer.scheduledTimer(withTimeInterval:1,repeats:true) { [weak self] _ in
             Task { @MainActor in self?.poll() }
         }
@@ -602,6 +594,7 @@ import CoreAudio
 
 struct ContentView: View {
     @ObservedObject var m: Model
+    var openSettings: (() -> Void)? = nil
     var body: some View {
         HStack(spacing:0) {
             sidebar.frame(width:285)
@@ -629,6 +622,7 @@ struct ContentView: View {
                     Button("Device order…") { m.showingDeviceOrder=true }
                     Button("Labels…") { m.openLabels() }
                     Button("Tools") { m.showingTools=true }
+                    if let openSettings { Button("Settings…",action:openSettings) }
                 }
                 if m.preset.dormantRouteCount > 0 {
                     Text("\(m.preset.dormantRouteCount) saved routes are inactive. They carry no audio and reactivate when the channel count increases.")
@@ -1040,39 +1034,3 @@ struct LabelEditor: View {
         .onChange(of:m.ioBusy) { _,busy in if !busy { commit() } }
     }
 }
-final class AppDelegate: NSObject, NSApplicationDelegate {
-    private var focusMonitor: Any?
-    func applicationDidFinishLaunching(_ notification: Notification) {
-        // Buttons and the native matrix do not normally take keyboard focus on macOS.
-        // End field editing before forwarding an outside click to its target.
-        focusMonitor = NSEvent.addLocalMonitorForEvents(matching:[.leftMouseDown,.rightMouseDown]) { event in
-            if let window=event.window,
-               let editor=window.firstResponder as? NSTextView, editor.isFieldEditor,
-               let field=editor.delegate as? NSTextField,
-               ["To Computer","From Computer","Empty uses routing name","Empty uses interface name"].contains(field.placeholderString ?? ""),
-               !field.bounds.contains(field.convert(event.locationInWindow,from:nil)) {
-                window.makeFirstResponder(nil)
-            }
-            return event
-        }
-    }
-    func applicationWillTerminate(_ notification: Notification) {
-        if let focusMonitor { NSEvent.removeMonitor(focusMonitor) }
-    }
-    func applicationShouldTerminate(_ sender:NSApplication)->NSApplication.TerminateReply { .terminateNow }
-    func applicationShouldTerminateAfterLastWindowClosed(_ sender:NSApplication)->Bool {true}
-}
-#if !STUDIOPATCH_MODEL_TESTS
-@main struct StudioPatchApp: App {
-    @NSApplicationDelegateAdaptor(AppDelegate.self) var delegate
-    @StateObject var model=Model()
-    var body: some Scene {
-        WindowGroup {ContentView(m:model)}.defaultSize(width:1200,height:800)
-            .commands {
-                // Also reachable while audio runs, e.g. to retry an interface that could not start.
-                CommandGroup(after:.appSettings) { Button("Restart Audio Service",action:model.restartService) }
-            }
-    }
-}
-
-#endif

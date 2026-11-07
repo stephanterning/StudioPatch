@@ -28,7 +28,7 @@ StudioPatch gives your DAW a single device called **StudioPatch** with exactly t
 - **Low added latency.** The Sync Source interface is read directly through shared memory, without resampling. Measured: +0.67 ms round trip at 96 kHz and +1.33 ms at 48 kHz compared with using the interface directly ([details](Docs/LATENCY.md)).
 - **Honest latency reporting**, so DAW recording compensation keeps working.
 - **Sample rate follows your DAW.** Change the rate in the DAW or the panel; the Sync Source and locked interfaces follow. If the Sync Source cannot change, everything stays at the previous rate and you are told why.
-- **Runs in the background.** Audio keeps running after you close the control panel and starts at login.
+- **A regular Mac app with menu bar status.** StudioPatch appears in the Dock and ⌘Tab. Click the menu bar icon and choose **Open StudioPatch** to bring it forward. Quitting the app leaves the separate status icon and audio running. The logo follows the menu bar appearance, with turquoise available in Settings.
 - **Survives unplugging.** A disconnected interface keeps its routes and labels (greyed out). The preset’s virtual device leaves Core Audio until every selected interface is back and routing is ready; a notification reports the removal.
 - **Autosave and presets.** Every change is saved immediately; named presets let you switch between setups.
 
