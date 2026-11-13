@@ -1,5 +1,6 @@
 import SwiftUI
 import CoreAudio
+import UniformTypeIdentifiers
 
 @MainActor final class Model: ObservableObject {
     @Published var devices: [Device] = []
@@ -38,12 +39,19 @@ import CoreAudio
     @Published var presetSlots: [PresetSlot] = []
     @Published var showingLabels = false
     @Published var showingTools = false
+    @Published var showingDiagnostics = false
+    @Published var diagnostics:AudioDiagnostics?
+    @Published var savingDiagnosticReport=false
+    @Published var diagnosticReportStatus=""
+    @Published private(set) var diagnosticCounterBaseline:DiagnosticCounterBaseline?
+    @Published var diagnosticCounterNotice=""
     @Published var showingDeviceOrder = false
     @Published var labelDirection = 0
     @Published var labelSelection: Port?
     @Published var pendingRemoval: Device?
     @Published var saveStatus = ""
     private let sessionStore: SessionStore
+    private let diagnosticCounterStore:DiagnosticCounterStore
     private let sourceLabelStore: SourceLabelStore
     @Published private(set) var sourceLabels: [ChannelLabelKey:String] = [:]
     @Published private(set) var updatingLabel: ChannelLabelKey?
@@ -60,6 +68,16 @@ import CoreAudio
     var virtualDevice: Device? { devices.first { $0.uid == preset.deviceUID } }
 
     @Published private var runtimeLatencyDiagnostics: String?
+    var displayedDiagnostics:AudioDiagnostics? {
+        diagnostics.map { diagnosticCounterBaseline?.applying(to:$0) ?? $0 }
+    }
+    var diagnosticCounterResetDate:Date? {
+        guard let diagnostics,let baseline=diagnosticCounterBaseline,baseline.matches(diagnostics) else { return nil }
+        return baseline.resetAt
+    }
+    var canResetDiagnosticCounters:Bool {
+        diagnostics.map { $0.available && $0.fresh && $0.generation != nil && !$0.devices.isEmpty } ?? false
+    }
     var interfaceTimingText: String {
         guard let raw=runtimeLatencyDiagnostics,let data=raw.data(using:.utf8),
               let timing=(try? JSONSerialization.jsonObject(with:data)) as? [String:Any],
@@ -393,7 +411,10 @@ import CoreAudio
         self.liveRuntime=discoverDevices
         self.inventoryReader=inventoryReader
         sessionStore = store
+        diagnosticCounterStore=DiagnosticCounterStore(directory:store.url.deletingLastPathComponent())
         sourceLabelStore=SourceLabelStore(url:store.url.deletingLastPathComponent().appendingPathComponent("source-labels.json"))
+        do { diagnosticCounterBaseline=try diagnosticCounterStore.load() }
+        catch { diagnosticCounterNotice="Could not read the saved counter interval: \(error.localizedDescription)" }
         do { sourceLabels=try sourceLabelStore.load() }
         catch { self.error="Could not load interface labels: \(error.localizedDescription)" }
         var isNewSession = false
@@ -491,10 +512,45 @@ import CoreAudio
         do { try RuntimeConnection.launch(restart:true); running=false; message="Restarting the audio service…" }
         catch { message="Could not restart the background engine: \(error.localizedDescription)" }
     }
+    func saveDiagnosticReport() {
+        let markedAt=Date()
+        let panel=NSSavePanel();panel.title="Save audio problem report"
+        panel.message="Includes recent diagnostic history, current settings and the time you clicked Save report. No audio is recorded."
+        panel.allowedContentTypes=[.zip];panel.canCreateDirectories=true
+        panel.nameFieldStringValue="StudioPatch-\(AudioDiagnosticRecorder.timestamp(markedAt).replacingOccurrences(of:":",with:"-")).zip"
+        panel.begin { [weak self] response in
+            guard response == .OK,let url=panel.url else { return }
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.savingDiagnosticReport=true;self.diagnosticReportStatus="Saving diagnostic report…"
+                DispatchQueue.global(qos:.utility).async { [weak self] in
+                    let failure:String?
+                    do { try DiagnosticReport.save(to:url,markedAt:markedAt);failure=nil }
+                    catch { failure=error.localizedDescription }
+                    Task { @MainActor [weak self] in
+                        self?.savingDiagnosticReport=false
+                        self?.diagnosticReportStatus=failure.map { "Report could not be saved: "+$0 } ?? "Report saved: \(url.lastPathComponent)"
+                        if failure == nil { NSWorkspace.shared.activateFileViewerSelecting([url]) }
+                    }
+                }
+            }
+        }
+    }
+    func resetDiagnosticCounters() {
+        do {
+            let latest:AudioDiagnostics?
+            if liveRuntime { latest=try RuntimeConnection.read().diagnostics } else { latest=diagnostics }
+            guard let latest else {
+                throw NSError(domain:"StudioPatch",code:40,userInfo:[NSLocalizedDescriptionKey:"Wait for fresh audio diagnostics before resetting counters."])
+            }
+            let baseline=try diagnosticCounterStore.reset(latest)
+            diagnostics=latest;diagnosticCounterBaseline=baseline;diagnosticCounterNotice=""
+        } catch { diagnosticCounterNotice="Could not reset counters: \(error.localizedDescription)" }
+    }
     private func readRuntime() {
         let snapshot:RuntimeSnapshot
         // A stale or missing snapshot means audio status is unknown, not running.
-        do { snapshot=try RuntimeConnection.read() } catch { running=false; health = .error; message=error.localizedDescription; return }
+        do { snapshot=try RuntimeConnection.read() } catch { diagnostics?.fresh=false;running=false; health = .error; message=error.localizedDescription; return }
         do {
             let previousDevices=preset.knownDevices
             loadingRuntime=true
@@ -503,6 +559,7 @@ import CoreAudio
             health=snapshot.health
             message=snapshot.message
             runtimeLatencyDiagnostics=snapshot.latencyDiagnostics
+            diagnostics=snapshot.diagnostics
             if virtualDevice != nil, (8000...384000).contains(snapshot.rate) { preset.sampleRate=snapshot.rate }
             loadingRuntime=false
             if previousDevices != preset.knownDevices { try sessionStore.save(preset) }
@@ -592,6 +649,80 @@ import CoreAudio
     }
 }
 
+struct AudioDiagnosticsView: View {
+    @ObservedObject var m:Model
+    private let counters=[("bufferErrors","Buffer errors"),("timestampErrors","Timestamp errors"),
+        ("timelineJumps","Timeline changes"),("incompletePlaybackBlocks","Incomplete playback blocks")]
+    var body: some View {
+        VStack(alignment:.leading,spacing:16) {
+            HStack {
+                Text("Audio Diagnostics").font(.title2.weight(.semibold))
+                Spacer()
+                Button("Done") { m.showingDiagnostics=false }.keyboardShortcut(.cancelAction)
+            }
+            Text("Recent history is saved automatically, including while this panel is closed. Save a report when you hear a problem; it remains useful after restarting the audio service.")
+                .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal:false,vertical:true)
+            if let diagnostics=m.displayedDiagnostics,diagnostics.available {
+                HStack(spacing:20) {
+                    ForEach(counters,id:\.0) { key,label in
+                        VStack(alignment:.leading,spacing:4) {
+                            Text("\(diagnostics.total(key))").font(.title2.monospacedDigit())
+                            Text(label).font(.caption).foregroundStyle(.secondary)
+                        }
+                    }
+                }
+                Text((m.diagnosticCounterResetDate.map { "Counters since reset at "+$0.formatted(date:.abbreviated,time:.standard) } ?? "Counters since this engine started")
+                    + " · \(diagnostics.fresh ? "Updated" : "Last observation") \(diagnostics.observedAt.formatted(date:.omitted,time:.standard))")
+                    .font(.caption).foregroundStyle(diagnostics.fresh ? Color.secondary : .orange)
+                ScrollView {
+                    VStack(alignment:.leading,spacing:18) {
+                        ForEach(diagnostics.devices) { device in
+                            VStack(alignment:.leading,spacing:7) {
+                                Text(device.name+(device.master ? " · Sync Source" : "")).font(.headline)
+                                Grid(alignment:.leading,horizontalSpacing:24,verticalSpacing:5) {
+                                    ForEach(counters,id:\.0) { key,label in
+                                        GridRow {
+                                            Text(label).foregroundStyle(.secondary)
+                                            Text("\(device.totals[key] ?? 0)").monospacedDigit()
+                                            Text("+\(device.recent[key] ?? 0) since previous observation").foregroundStyle(.secondary)
+                                        }
+                                    }
+                                }.font(.caption)
+                                if diagnostics.timelineCounterVersion == 2 {
+                                    Text("Timeline changes: \(device.totals["inputTimelineJumps"] ?? 0) input · \(device.totals["outputTimelineJumps"] ?? 0) output")
+                                        .font(.caption).foregroundStyle(.secondary)
+                                }
+                                if let age=device.callbackAgeMs {
+                                    Text(String(format:"Last audio callback: %.2f ms before observation",age)).font(.caption).foregroundStyle(.secondary)
+                                }
+                                if !device.master,let skew=device.clockSkewFrames,let peak=device.peakClockSkewFrames {
+                                    Text(String(format:"Timestamp deviation: %+.2f samples · engine peak %+.2f",skew,peak)).font(.caption).foregroundStyle(.secondary)
+                                }
+                            }
+                            Divider()
+                        }
+                    }.frame(maxWidth:.infinity,alignment:.leading)
+                }
+            } else {
+                Text("Per-interface diagnostics are not available from the current audio service. You can still save its current status and any retained history.")
+                    .font(.callout).foregroundStyle(.secondary)
+            }
+            Text((m.diagnostics?.timelineCounterVersion == 2
+                ? "Timeline changes count gaps or overlaps in input/output blocks, once per affected callback. Device changes can cause them."
+                : "This older timeline counter includes callback scheduling variation.")
+                + " An incomplete playback block contains both available and missing output samples. Timestamp deviation does not verify hardware clock sync.")
+                .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal:false,vertical:true)
+            HStack {
+                Button("Reset counters",action:m.resetDiagnosticCounters).disabled(!m.canResetDiagnosticCounters)
+                    .help("Starts a new counter interval. Audio keeps running and diagnostic history is preserved.")
+                Button("Save report…",action:m.saveDiagnosticReport).disabled(m.savingDiagnosticReport)
+                Text(m.diagnosticReportStatus).font(.caption).foregroundStyle(.secondary).lineLimit(2)
+            }
+            if !m.diagnosticCounterNotice.isEmpty { Text(m.diagnosticCounterNotice).font(.caption).foregroundStyle(.orange).lineLimit(2) }
+        }.padding(24).frame(width:710,height:600).preferredColorScheme(.dark)
+    }
+}
+
 struct ContentView: View {
     @ObservedObject var m: Model
     var openSettings: (() -> Void)? = nil
@@ -622,6 +753,7 @@ struct ContentView: View {
                     Button("Device order…") { m.showingDeviceOrder=true }
                     Button("Labels…") { m.openLabels() }
                     Button("Tools") { m.showingTools=true }
+                    Button("Diagnostics…") { m.showingDiagnostics=true }
                     if let openSettings { Button("Settings…",action:openSettings) }
                 }
                 if m.preset.dormantRouteCount > 0 {
@@ -654,6 +786,7 @@ struct ContentView: View {
         .sheet(isPresented:$m.showingPresets) { PresetLibraryEditor(m:m) }
         .sheet(isPresented:$m.showingLabels) { LabelEditor(m:m) }
         .sheet(isPresented:$m.showingTools) { ToolsEditor(m:m) }
+        .sheet(isPresented:$m.showingDiagnostics) { AudioDiagnosticsView(m:m) }
         .sheet(isPresented:$m.showingDeviceOrder) { DeviceOrderEditor(m:m) }
         .alert("Remove audio interface?",isPresented:Binding(get:{m.pendingRemoval != nil},set:{if !$0 {m.pendingRemoval=nil}})) {
             Button("Cancel",role:.cancel) { m.pendingRemoval=nil }

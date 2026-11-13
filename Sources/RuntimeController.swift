@@ -14,12 +14,15 @@ import CoreAudio
     let sessionStore=SessionStore()
     var appliedRuntime="",desiredRuntime="",driverConfiguration=""
     var runtimeLatencyDiagnostics:String?,publishedNames:String?
+    let diagnosticRecorder=AudioDiagnosticRecorder()
+    var diagnosticStatusFresh=false
+    var audioDiagnostics:AudioDiagnostics?
     // Presentation only: neither field participates in configuration decisions.
     var engineStatus:EngineStatus?, operationWarning=false
     var health:RuntimeHealth {
         guard running else { return preset.devices.isEmpty ? .idle : .error }
         let engineProblem=engineStatus.map { !$0.warnings.isEmpty || $0.badBuffers>0 } ?? true
-        return operationWarning || engineProblem || !notes.isEmpty || !rateWarnings.isEmpty || !rejection.isEmpty || syncProblem != nil ? .warning : .healthy
+        return operationWarning || engineProblem || audioDiagnostics?.warning != nil || !notes.isEmpty || !rateWarnings.isEmpty || !rejection.isEmpty || syncProblem != nil ? .warning : .healthy
     }
     var lastDesiredRate=0,pendingPanelRate:Int?
     var nextRuntimeAttempt=Date.distantPast,runtimeRetry=RateRetrySchedule()
@@ -169,17 +172,25 @@ import CoreAudio
     func runtimeTick() {
         guard !ioBusy else { return }
         configurationTimer?.invalidate();configurationTimer=nil
-        ioBusy=true;notes=[];pollConfiguration=false
+        ioBusy=true;notes=[];pollConfiguration=false;diagnosticStatusFresh=false
         Task { [self] in
             defer {
                 ioBusy=false
+                audioDiagnostics=diagnosticRecorder.observe(raw:runtimeLatencyDiagnostics,fresh:diagnosticStatusFresh && running,devices:devices)
+                if let warning=audioDiagnostics?.warning {
+                    notes.append(warning)
+                    notifyOnce("diagnostics","audio-diagnostics",title:"audio data problem observed",body:warning)
+                }
+                if let error=diagnosticRecorder.storageError { notes.append("Diagnostic history could not be saved: "+error) }
                 let currentHealth=health
                 if currentHealth == .healthy {
                     RuntimeConnection.clearProblemNotifications()
                     notices.removeAll() // A later recurrence may notify again.
                 }
-                RuntimeConnection.write(RuntimeSnapshot(devices:devices,installed:installed,running:running,health:currentHealth,
-                    message:([message]+notes).joined(separator:" · "),rate:effectiveRate,latencyDiagnostics:runtimeLatencyDiagnostics))
+                let snapshot=RuntimeSnapshot(devices:devices,installed:installed,running:running,health:currentHealth,
+                    message:([message]+notes).joined(separator:" · "),rate:effectiveRate,latencyDiagnostics:runtimeLatencyDiagnostics,diagnostics:audioDiagnostics)
+                RuntimeConnection.write(snapshot)
+                diagnosticRecorder.record(snapshot,configuration:appliedRuntime.isEmpty ? desiredRuntime : appliedRuntime)
                 // One short burst per accepted transaction / started engine.
                 // Expiry only reduces polling to the ordinary heartbeat; it
                 // never cancels the request, withdraws a device or stops audio.
@@ -233,6 +244,7 @@ import CoreAudio
             var status:EngineStatus?
             do {
                 status=try JSONDecoder().decode(EngineStatus.self,from:try await AudioWorker.call { SPStatus() })
+                diagnosticStatusFresh=true
                 engineStatus=status
                 runtimeLatencyDiagnostics=status?.running == true ? status?.latencyDiagnostics : nil
                 if status?.running == false { running=false; appliedRuntime="" }
@@ -405,7 +417,10 @@ import CoreAudio
         catch { notes.append("Device inventory failed: \(error.localizedDescription)") }
         _ = try await AudioWorker.call { raw.withCString { SPStart($0) } }
         appliedRuntime=raw; desiredRuntime=raw; activeDeviceName=change.deviceName; running=true
-        do { engineStatus=try JSONDecoder().decode(EngineStatus.self,from:try await AudioWorker.call { SPStatus() }) }
+        do {
+            let status=try JSONDecoder().decode(EngineStatus.self,from:try await AudioWorker.call { SPStatus() })
+            engineStatus=status;diagnosticStatusFresh=true;runtimeLatencyDiagnostics=status.running ? status.latencyDiagnostics : nil
+        }
         catch { notes.append("Engine status unavailable: \(error.localizedDescription)") }
         publicationFollowUntil=ProcessInfo.processInfo.systemUptime+1
         do { try await publishChannelNames(force:true) }

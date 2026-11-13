@@ -1,7 +1,7 @@
 import os,json,time,subprocess,pathlib,sys,shutil
 root=pathlib.Path(sys.argv[2]).resolve();root.mkdir(exist_ok=True)
 executable=sys.argv[1]
-for f in ('fail','request','events','runtime-status.json','notifications.jsonl','visible-notifications.json','disconnected','bad-object','stale-hardware','secondary-present','start-fail','availability','clock-skew','names-fail','metadata-gap','inventory-bad-object','publish-fail','locked-refuses','master-refuses','secondary-rate','rate-error','inventory-rate','ack-fail','configure-fail','configure-unavailable','master-rate-unreadable','write-then-unreadable','configure-pending','configure-confirmation-fail','start-reject','restore-refuses','configure-delay','clock-not-ready','clock-delay'):
+for f in ('fail','request','events','runtime-status.json','notifications.jsonl','visible-notifications.json','disconnected','bad-object','stale-hardware','secondary-present','start-fail','availability','clock-skew','names-fail','metadata-gap','inventory-bad-object','publish-fail','locked-refuses','master-refuses','secondary-rate','rate-error','inventory-rate','ack-fail','configure-fail','configure-unavailable','master-rate-unreadable','write-then-unreadable','configure-pending','configure-confirmation-fail','start-reject','restore-refuses','configure-delay','clock-not-ready','clock-delay','diagnostic-values'):
  (root/f).unlink(missing_ok=True)
 preset={'inputCount':2,'outputCount':2,'sampleRate':96000,'bufferFrames':64,'delayFrames':256,'masterUID':'mock','devices':[{'uid':'mock','drift':False}],'inputs':[{'deviceUID':'mock','channel':1},None],'outputs':[]}
 def save():
@@ -492,6 +492,52 @@ try:
  preset=configured;save();wait(lambda s:s['running'] and s['health']=='healthy',15)
  assert [n['id'] for n in visible_notifications()]==['unrelated-note']
  print('PASS: no active configuration is gray; notification cleanup leaves unrelated identifiers alone',flush=True)
+ # Keep playback observations in diagnostics and notify on explicit errors.
+ before=counts();notes_before=len(all_notifications())
+ diagnostic={'diagnosticSchemaVersion':1,'generation':777,'devices':[{'uid':'mock','master':True,
+   'callbackCount':1,'bufferErrors':0,'timestampErrors':0,'timelineJumps':0,
+   'incompletePlaybackBlocks':0,'missingPlaybackSamples':20000,'clockSkewFrames':20000}]}
+ (root/'diagnostic-values').write_text(json.dumps(diagnostic))
+ s=wait(lambda s:s['health']=='healthy' and s.get('diagnostics',{}).get('available'))
+ assert len(all_notifications())==notes_before and counts()==before and available()
+ diagnostic['devices'][0].update(incompletePlaybackBlocks=1)
+ (root/'diagnostic-values').write_text(json.dumps(diagnostic))
+ s=wait(lambda s:s['diagnostics']['devices'][0]['totals']['incompletePlaybackBlocks']==1)
+ assert s['health']=='healthy' and s['diagnostics']['devices'][0]['recent']['incompletePlaybackBlocks']==1
+ assert len(all_notifications())==notes_before and counts()==before and available()
+ diagnostic['devices'][0].update(timestampErrors=2,incompletePlaybackBlocks=2,timelineJumps=1)
+ (root/'diagnostic-values').write_text(json.dumps(diagnostic))
+ s=wait(lambda s:s['health']=='warning' and 'Test master' in s['message'] and 'invalid timestamps' in s['message'])
+ assert s['diagnostics']['devices'][0]['recent']['timestampErrors']==2
+ wait(lambda s:s['health']=='healthy')
+ new_notifications=all_notifications()[notes_before:]
+ assert [n['id'] for n in new_notifications]==['audio-diagnostics']
+ assert 'invalid timestamps' in new_notifications[0]['body'] and 'incomplete playback' not in new_notifications[0]['body']
+ assert counts()==before and available()
+ def log_records():
+  rows=[]
+  for log in (root/'Diagnostics').glob('audio-*.jsonl'):
+   for line in log.read_text().splitlines():
+    try:rows.append(json.loads(line))
+    except json.JSONDecodeError:pass # A concurrently written last line is not yet committed.
+  return rows
+ end=time.time()+5
+ while not any(r.get('health')=='warning' and 'invalid timestamps' in r.get('message','') for r in log_records()) and time.time()<end:time.sleep(.1)
+ assert any(r.get('health')=='warning' and 'invalid timestamps' in r.get('message','') for r in log_records())
+ assert any(r.get('health')=='healthy' and any(d['recent']['incompletePlaybackBlocks']==1 for d in (r.get('diagnostics') or {}).get('devices',[])) for r in log_records())
+ (root/'status-fail').write_text('1')
+ s=wait(lambda s:'Engine status unavailable' in s['message'])
+ assert not s['diagnostics']['fresh'] and counts()==before
+ (root/'status-fail').unlink();s=wait(lambda s:s['health']=='healthy')
+ old_service=s['diagnostics']['serviceID']
+ p.terminate();p.communicate(timeout=5)
+ p=subprocess.Popen([executable],env=env,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+ s=wait(lambda s:s['running'] and s['health']=='healthy' and s.get('diagnostics',{}).get('serviceID')!=old_service)
+ end=time.time()+5
+ while len({r.get('serviceID') for r in log_records()})<2 and time.time()<end:time.sleep(.1)
+ assert old_service in {r.get('serviceID') for r in log_records()}
+ assert s['diagnostics']['serviceID'] in {r.get('serviceID') for r in log_records()}
+ print('PASS: diagnostic history retains partial playback blocks and timestamp errors; only timestamp errors warn',flush=True)
  # A new service starting with missing hardware never publishes a placeholder.
  offline=root/'offline-start';offline.mkdir()
  (offline/'last-session.json').write_text(json.dumps(preset));(offline/'disconnected').write_text('1')

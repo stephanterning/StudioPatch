@@ -15,6 +15,7 @@ struct RuntimeSnapshot: Codable {
     var message: String
     var rate: Int
     var latencyDiagnostics: String? = nil
+    var diagnostics: AudioDiagnostics? = nil
 }
 enum RuntimeConnection {
     static let directory:URL = ProcessInfo.processInfo.environment["STUDIOPATCH_TEST_DIRECTORY"].map { URL(fileURLWithPath:$0) } ?? FileManager.default.urls(for:.applicationSupportDirectory,in:.userDomainMask)[0].appendingPathComponent("StudioPatch")
@@ -40,7 +41,7 @@ enum RuntimeConnection {
         notify(identifier:"device-unavailable",title:"StudioPatch: audio interface disconnected",
                body:"\(name) was removed from Core Audio. \(reason)")
     }
-    private static let problemIDs:Set<String> = ["device-unavailable","runtime-failure","format-failed","rate-refused","sync-mismatch"]
+    private static let problemIDs:Set<String> = ["device-unavailable","runtime-failure","format-failed","rate-refused","sync-mismatch","audio-diagnostics"]
     @MainActor private static var notificationIDs:[String:String] = [:]
     @MainActor private static var notificationsCleared=false
 

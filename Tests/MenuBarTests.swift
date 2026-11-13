@@ -26,12 +26,24 @@ import ServiceManagement
         let defaults=UserDefaults(suiteName:suite)!
         let directory=FileManager.default.temporaryDirectory.appendingPathComponent(suite)
         defer { defaults.removePersistentDomain(forName:suite); try? FileManager.default.removeItem(at:directory) }
-        if CommandLine.arguments.contains("--preview") || Bundle.main.bundleIdentifier == "se.studiopatch.preview" {
+        let diagnosticPreview=CommandLine.arguments.contains("--diagnostics-preview") || Bundle.main.bundleIdentifier == "se.studiopatch.preview.diagnostics"
+        if CommandLine.arguments.contains("--preview") || diagnosticPreview || Bundle.main.bundleIdentifier == "se.studiopatch.preview" {
             let app=NSApplication.shared
             let preferences=AppPreferences(defaults:defaults,loginItem:FakeLoginItem(),notifyChanged:{})
             let model=Model(store:SessionStore(url:directory.appendingPathComponent("session.json")),discoverDevices:false)
             model.health = .healthy; model.message="Routing active · 32 samples · 96 kHz"
             model.running=true; model.inventoryKnown=true; model.installed=true
+            if diagnosticPreview {
+                model.devices=[Device(id:1,uid:"preview-ufx",name:"Fireface UFX III",inputs:2,outputs:2,sampleRate:96000,aggregate:false,inputNames:[],outputNames:[]),
+                    Device(id:2,uid:"preview-zed",name:"ZED R16 — ASFW",inputs:2,outputs:2,sampleRate:96000,aggregate:false,inputNames:[],outputNames:[])]
+                let raw="""
+                {"diagnosticSchemaVersion":1,"timelineCounterVersion":2,"generation":123,"devices":[
+                {"uid":"preview-ufx","master":true,"bufferErrors":0,"timestampErrors":0,"timelineJumps":0,"incompletePlaybackBlocks":0,"missingPlaybackSamples":0,"lastCallbackAgeMs":0.3},
+                {"uid":"preview-zed","master":false,"bufferErrors":0,"timestampErrors":2,"timelineJumps":1,"inputTimelineJumps":1,"outputTimelineJumps":0,"incompletePlaybackBlocks":1,"missingPlaybackSamples":64,"lastCallbackAgeMs":0.7,"clockSkewFrames":-1.4,"peakClockSkewFrames":-19.5}]}
+                """
+                model.diagnostics=AudioDiagnosticRecorder(directory:directory).observe(raw:raw,fresh:true,devices:model.devices)
+                model.showingDiagnostics=true
+            }
             let controller=AppDelegate(preferences:preferences,makeModel:{model})
             app.delegate=controller
             withExtendedLifetime(controller) { app.run() }

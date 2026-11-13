@@ -6,7 +6,7 @@ mkdir -p "$task_build"
 clang++ -std=c++17 -c "$task_root/Tests/RuntimeFake.cpp" -o "$task_build/runtime-fake.o"
 xcrun swiftc -parse-as-library -swift-version 5 -D STUDIOPATCH_MODEL_TESTS -D STUDIOPATCH_FAKE_AUDIO \
     -module-cache-path "$task_build/swift-cache" -import-objc-header "$task_root/Sources/Bridge.h" \
-    "$task_root/Sources/RuntimeTypes.swift" "$task_root/Sources/RuntimeController.swift" "$task_root/Sources/RuntimeConnection.swift" "$task_root/Sources/SessionStore.swift" "$task_root/Sources/Preset.swift" \
+    "$task_root/Sources/RuntimeTypes.swift" "$task_root/Sources/RuntimeController.swift" "$task_root/Sources/RuntimeConnection.swift" "$task_root/Sources/Diagnostics.swift" "$task_root/Sources/SessionStore.swift" "$task_root/Sources/Preset.swift" \
     "$task_root/Sources/Service.swift" "$task_build/runtime-fake.o" \
     -framework UserNotifications -framework AppKit -framework Foundation -lc++ -o "$task_build/runtime-test-service"
 # Fail the test setup if a real HAL entry point leaked into the fake backend.

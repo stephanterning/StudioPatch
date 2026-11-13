@@ -28,6 +28,10 @@ add_executable(direct-tests Tests/DirectTests.mm)
 target_compile_options(direct-tests PRIVATE -fobjc-arc -UNDEBUG)
 target_link_libraries(direct-tests PRIVATE "-framework Foundation" "-framework CoreAudio")
 add_test(NAME direct-tests COMMAND direct-tests)
+add_executable(transport-timing-tests Tests/TransportTimingTests.mm)
+target_compile_options(transport-timing-tests PRIVATE -fobjc-arc -UNDEBUG)
+target_link_libraries(transport-timing-tests PRIVATE aspl "-framework Foundation")
+add_test(NAME transport-timing-tests COMMAND transport-timing-tests)
 add_executable(bridge-fault-tests Tests/BridgeFaultTests.mm)
 target_compile_options(bridge-fault-tests PRIVATE -fobjc-arc -UNDEBUG)
 target_link_libraries(bridge-fault-tests PRIVATE "-framework Foundation" "-framework CoreAudio")
@@ -54,6 +58,7 @@ add_custom_command(OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/session-tests"
         "${CMAKE_CURRENT_SOURCE_DIR}/Sources/Matrix.swift"
         "${CMAKE_CURRENT_SOURCE_DIR}/Sources/MatrixGroups.swift"
         "${CMAKE_CURRENT_SOURCE_DIR}/Sources/RuntimeConnection.swift"
+        "${CMAKE_CURRENT_SOURCE_DIR}/Sources/Diagnostics.swift"
         "${CMAKE_CURRENT_SOURCE_DIR}/Sources/RuntimeTypes.swift"
         "${CMAKE_CURRENT_SOURCE_DIR}/Sources/RuntimeController.swift"
         "${CMAKE_CURRENT_SOURCE_DIR}/Sources/AbletonLabels.swift"
@@ -64,7 +69,7 @@ add_custom_command(OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/session-tests"
         "$<TARGET_FILE:patchbridge>"
         -framework UserNotifications -framework SwiftUI -framework AppKit -framework Foundation -framework CoreAudio -lc++
         -o "${CMAKE_CURRENT_BINARY_DIR}/session-tests"
-    DEPENDS Sources/Preset.swift Sources/SessionStore.swift Sources/Matrix.swift Sources/MatrixGroups.swift Sources/RuntimeConnection.swift Sources/RuntimeTypes.swift Sources/RuntimeController.swift Sources/MenuBarController.swift Sources/App.swift Sources/AbletonLabels.swift Sources/AbletonToolsView.swift Sources/Bridge.h Tests/SessionTests.swift patchbridge VERBATIM)
+    DEPENDS Sources/Preset.swift Sources/SessionStore.swift Sources/Matrix.swift Sources/MatrixGroups.swift Sources/RuntimeConnection.swift Sources/Diagnostics.swift Sources/RuntimeTypes.swift Sources/RuntimeController.swift Sources/MenuBarController.swift Sources/App.swift Sources/AbletonLabels.swift Sources/AbletonToolsView.swift Sources/Bridge.h Tests/SessionTests.swift patchbridge VERBATIM)
 add_custom_target(session-tests-build ALL DEPENDS "${CMAKE_CURRENT_BINARY_DIR}/session-tests")
 add_test(NAME session-tests COMMAND "${CMAKE_CURRENT_BINARY_DIR}/session-tests")
 
@@ -78,6 +83,7 @@ add_custom_command(OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/menu-bar-tests"
         "${CMAKE_CURRENT_SOURCE_DIR}/Sources/Matrix.swift"
         "${CMAKE_CURRENT_SOURCE_DIR}/Sources/MatrixGroups.swift"
         "${CMAKE_CURRENT_SOURCE_DIR}/Sources/RuntimeConnection.swift"
+        "${CMAKE_CURRENT_SOURCE_DIR}/Sources/Diagnostics.swift"
         "${CMAKE_CURRENT_SOURCE_DIR}/Sources/RuntimeTypes.swift"
         "${CMAKE_CURRENT_SOURCE_DIR}/Sources/RuntimeController.swift"
         "${CMAKE_CURRENT_SOURCE_DIR}/Sources/AbletonLabels.swift"
@@ -90,7 +96,7 @@ add_custom_command(OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/menu-bar-tests"
         "$<TARGET_FILE:patchbridge>"
         -framework UserNotifications -framework SwiftUI -framework AppKit -framework Foundation -framework CoreAudio -framework ServiceManagement -lc++
         -o "${CMAKE_CURRENT_BINARY_DIR}/menu-bar-tests"
-    DEPENDS Sources/Preset.swift Sources/SessionStore.swift Sources/Matrix.swift Sources/MatrixGroups.swift Sources/RuntimeConnection.swift Sources/RuntimeTypes.swift Sources/RuntimeController.swift Sources/MenuBarController.swift Sources/App.swift Sources/AppShell.swift Sources/MenuBarAgent.swift Sources/AbletonLabels.swift Sources/AbletonToolsView.swift Sources/Bridge.h Tests/MenuBarTests.swift patchbridge VERBATIM)
+    DEPENDS Sources/Preset.swift Sources/SessionStore.swift Sources/Matrix.swift Sources/MatrixGroups.swift Sources/RuntimeConnection.swift Sources/Diagnostics.swift Sources/RuntimeTypes.swift Sources/RuntimeController.swift Sources/MenuBarController.swift Sources/App.swift Sources/AppShell.swift Sources/MenuBarAgent.swift Sources/AbletonLabels.swift Sources/AbletonToolsView.swift Sources/Bridge.h Tests/MenuBarTests.swift patchbridge VERBATIM)
 add_custom_target(menu-bar-tests-build ALL DEPENDS "${CMAKE_CURRENT_BINARY_DIR}/menu-bar-tests")
 add_test(NAME menu-bar-tests COMMAND "${CMAKE_CURRENT_BINARY_DIR}/menu-bar-tests")
 
@@ -131,3 +137,20 @@ add_custom_command(OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/matrix-group-tests"
     DEPENDS Sources/MatrixGroups.swift Sources/Matrix.swift Tests/MatrixGroupTests.swift VERBATIM)
 add_custom_target(matrix-group-tests-build ALL DEPENDS "${CMAKE_CURRENT_BINARY_DIR}/matrix-group-tests")
 add_test(NAME matrix-group-tests COMMAND "${CMAKE_CURRENT_BINARY_DIR}/matrix-group-tests")
+
+add_custom_command(OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/diagnostics-tests"
+    COMMAND "${XCRUN_EXECUTABLE}" swiftc -parse-as-library -swift-version 5
+        -module-cache-path "${CMAKE_CURRENT_BINARY_DIR}/swift-cache"
+        -import-objc-header "${CMAKE_CURRENT_SOURCE_DIR}/Sources/Bridge.h"
+        "${CMAKE_CURRENT_SOURCE_DIR}/Sources/RuntimeTypes.swift"
+        "${CMAKE_CURRENT_SOURCE_DIR}/Sources/RuntimeConnection.swift"
+        "${CMAKE_CURRENT_SOURCE_DIR}/Sources/Diagnostics.swift"
+        "${CMAKE_CURRENT_SOURCE_DIR}/Sources/SessionStore.swift"
+        "${CMAKE_CURRENT_SOURCE_DIR}/Sources/Preset.swift"
+        "${CMAKE_CURRENT_SOURCE_DIR}/Tests/DiagnosticsTests.swift"
+        "$<TARGET_FILE:patchbridge>"
+        -framework UserNotifications -framework AppKit -framework Foundation -framework CoreAudio -lc++
+        -o "${CMAKE_CURRENT_BINARY_DIR}/diagnostics-tests"
+    DEPENDS Sources/RuntimeTypes.swift Sources/RuntimeConnection.swift Sources/Diagnostics.swift Sources/SessionStore.swift Sources/Preset.swift Sources/Bridge.h Tests/DiagnosticsTests.swift patchbridge VERBATIM)
+add_custom_target(diagnostics-tests-build ALL DEPENDS "${CMAKE_CURRENT_BINARY_DIR}/diagnostics-tests")
+add_test(NAME diagnostics-tests COMMAND "${CMAKE_CURRENT_BINARY_DIR}/diagnostics-tests")

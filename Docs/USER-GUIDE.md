@@ -21,6 +21,8 @@ The **sidebar** on the left holds the virtual device settings and the list of au
 - **Sample Rate:** the rates the Sync Source supports. Changing it here, or changing the StudioPatch device's rate in your DAW, asks the Sync Source for that rate; locked interfaces then follow the rate the Sync Source actually reaches. If the Sync Source cannot change, StudioPatch and your DAW stay at the previous rate and you get a message and a notification.
 - **Advanced → I/O buffer:** the buffer size (32–1024 samples) StudioPatch uses when talking to the physical interfaces. This is separate from your DAW's buffer size. Smaller values give lower latency. The Advanced section also shows the current software margin and each secondary interface's latency difference relative to the Sync Source.
 
+  StudioPatch reserves two hardware blocks in each direction to cover callback phase and the complete producer/consumer block. This lets a larger hardware buffer work with smaller DAW buffers. At 32 samples, the calculated added round trip is 1.333 ms at 96 kHz or 2.667 ms at 48 kHz. A secondary that uses larger blocks gets additional delay on its own routes, shown in its latency difference.
+
 ### Audio interfaces
 
 Each physical interface has:
@@ -257,6 +259,31 @@ If StudioPatch changes the Sync Source rate but Core Audio rejects the format, S
 **Clock diagnostics.** Advanced shows each secondary interface's timestamp deviation from the Sync Source. These values come from driver timestamps, not hardware clock-lock status. They do not mute audio, restart the engine or require acknowledgement. StudioPatch routes the samples the connected interfaces supply; configure external clocking and optional drift correction yourself. An unlocked interface's sample-rate mismatch does not prevent routing. No resampling is added automatically.
 
 **Warnings while routing.** StudioPatch starts with what the hardware accepts and tells you about the rest in the status line: a locked interface that is not in sync with the Sync Source, a Sync Source that refused a requested rate (StudioPatch stays at the rate it runs at), a secondary interface that could not start, and routes to channels an interface no longer offers, for example ADAT or MADI channels at double speed. Those routes stay silent. A secondary that could not start is tried again at the next configuration change, when it is reconnected, or when you choose **Restart Audio Service**.
+
+## Audio diagnostics and problem reports
+
+Choose **Diagnostics…** beside Tools to see counters for each interface. Totals cover the current engine generation; the per-interface rows also show increases since the previous observation.
+
+| Counter | What StudioPatch observed |
+|---|---|
+| Buffer errors | A malformed buffer caused that callback to be skipped. |
+| Timestamp errors | Required timestamp validity flags were missing from a callback or a routed input/output block. |
+| Timeline changes | Consecutive input or output buffer frame ranges have a gap, overlap or counter restart. One affected callback counts once, even if both directions change. Callback scheduling variation is excluded. Device changes can cause discontinuities; they do not establish a clock fault. |
+| Incomplete playback blocks | A block contained both available and missing requested output samples. |
+
+New buffer and timestamp errors produce a status warning and a problem notification. Incomplete playback blocks can occur when playback starts or stops within a block. Their counts appear in Diagnostics and saved reports alongside other observations such as timeline changes and timestamp deviation. Saved reports include the raw count of requested samples absent from the playback timeline, including during idle periods and counting each routed destination separately. No diagnostic observation stops routing, changes clock settings or triggers recovery. These are StudioPatch's observations, not the USB/FireWire error counters maintained by an interface's own driver. They do not certify hardware sync or audible sound quality.
+
+Timeline tracking uses each direction's own buffer start and the preceding buffer's actual length, including variable block lengths. The first valid block establishes a baseline. A missing/invalid sample timestamp or absent direction clears that direction's baseline, so the next valid block does not invent an interruption across unknown data. The per-interface details and report include separate input/output counts and signed frame offsets for the last discontinuity. The combined counter counts callbacks, not the sum of the two directions.
+
+Reports identify this corrected measurement as `timelineCounterVersion: 2`. Retained older records without that field (or version 1) measured callback wake-up timestamps and can include ordinary scheduling variation. They remain in history with their original meaning; they are not reinterpreted as buffer discontinuities.
+
+**Reset counters** starts a new measurement interval for all displayed counters without interrupting audio. The counters immediately show zero and then show subsequent increases; the reset time appears above the interface details. This interval is saved when the panel closes. A new audio-engine generation automatically starts a new interval. Live timestamp deviation and the **engine peak** remain clock observations, rather than counters to zero. Existing audio warnings remain active.
+
+Reset does not erase the underlying counters or retained log history. Reports include `diagnostic-counter-baseline.json` when a reset has been saved, so the displayed interval can be reconstructed alongside the original observations. If fresh diagnostics are unavailable or the interval cannot be saved, reset reports the problem and keeps the previous interval.
+
+The audio service saves observations about once a second, and also records changes in state and diagnostic events, in `~/Library/Application Support/StudioPatch/Diagnostics/`. History continues while the control panel is closed and survives service restarts. Up to sixteen log files are retained, with an 8 MiB rotation target per file (approximately 128 MiB total). Records identify the service run, engine generation, executable build, interface UIDs, routing configuration, counters, clock/sample observations and timing offsets. Failed status reads are marked as stale; a failed log write is shown as a warning while audio continues.
+
+When a problem is audible, choose **Diagnostics… → Save report…**. The ZIP contains the retained history, current saved settings/status and an incident timestamp taken when you clicked **Save report…**. Save before restarting when possible. A report saved after restart still includes the earlier run while it remains in retained history. Settings and device names are included; no audio is recorded. Reports are saved locally and are not sent anywhere automatically.
 
 ## Interface-specific notes
 

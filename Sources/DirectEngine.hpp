@@ -4,6 +4,23 @@ public:
     struct InputRoute {Channel source;uint32_t dest;};
     struct OutputRoute {uint32_t source;Channel dest;};
     struct Routes {std::vector<InputRoute> inputs;std::vector<OutputRoute> outputs;};
+    struct BufferTimeline {
+        struct Change {bool discontinuity=false,reset=false;double step=0;};
+        bool valid=false;int64_t first=0,end=0;
+        Change observe(const AudioTimeStamp* stamp,uint32_t frames,bool present) {
+            if(!present || !frames || !stamp || !(stamp->mFlags&kAudioTimeStampSampleTimeValid) ||
+               !std::isfinite(stamp->mSampleTime) || stamp->mSampleTime<=double(INT64_MIN) || stamp->mSampleTime>=double(INT64_MAX)) {
+                valid=false;return {};
+            }
+            // Compare the frame tags used for sample copying. Callback wake-up
+            // time (inNow) includes scheduling latency and is not a block edge.
+            const auto next=int64_t(std::llround(stamp->mSampleTime));
+            if(next>INT64_MAX-int64_t(frames)){valid=false;return {};}
+            Change change{valid && next!=end,valid && next<first,valid?double(next)-double(end):0};
+            first=next;end=next+frames;valid=true;
+            return change;
+        }
+    };
     NSDictionary* graph=nil;
     std::atomic<uint64_t> routingUpdates{0};
     struct DeviceIO {
@@ -14,6 +31,19 @@ public:
         patch::ClockSample previousClock{};
         uint32_t previousFrames=0;uint64_t alignedEpoch=0;double previousSample=-INFINITY;
         std::atomic<double> clockSkew{0},peakClockSkew{0};
+        // Callback-owned observations only. Control threads persist snapshots;
+        // none of these counters changes routing or attempts recovery.
+        std::atomic<uint64_t> callbacks{0},lastCallbackHost{0},malformedBuffers{0},invalidTimestamps{0},clockUnavailable{0};
+        std::atomic<uint64_t> counterResets{0},sampleDiscontinuities{0},realignments{0};
+        std::atomic<uint64_t> inputTimelineJumps{0},outputTimelineJumps{0};
+        std::atomic<uint64_t> playbackSamples{0},playbackMissingSamples{0},partialPlaybackBlocks{0};
+        std::atomic<double> mappingOffset{0},lastSampleStep{0},rawSample{0};
+        std::atomic<double> lastInputSampleStep{0},lastOutputSampleStep{0};
+        std::atomic<uint32_t> lastBlockFrames{0};
+        std::atomic<uint32_t> largestBlockFrames{0};
+        patch::CycleObservation callbackClock;
+        std::atomic<uint64_t> lastBufferErrorHost{0},lastTimestampErrorHost{0},lastTimelineChangeHost{0},lastIncompletePlaybackHost{0};
+        BufferTimeline inputTimeline,outputTimeline;
         uint32_t physicalInputLatency=0,physicalOutputLatency=0,inputSafety=0,outputSafety=0;
         uint32_t timingIndex=0,buffer=0,extraInput=0,extraOutput=0,inputOffset=0,outputOffset=0;
         std::vector<UInt32> inLayout,outLayout;
@@ -71,19 +101,40 @@ public:
         } catch(const std::exception&) {}
         return false;
     }
+    uint32_t transportPadding(uint32_t frames,bool input) const {
+        if(!input && outputPaddingOverride>=0)return uint32_t(outputPaddingOverride);
+        // Reserve both relative callback phase and the producer's full block
+        // budget. A fixed short guard does not cover publication of a large
+        // block. The same two-block bound covers the future playback range.
+        return std::max(uint32_t(std::ceil(double(memory->data->rate)/3000.0)),2*frames);
+    }
+    // A secondary may accept a larger block than the Sync Source. Give only
+    // that path the extra delay instead of slowing every routed interface.
+    uint32_t additionalPadding(const DeviceIO& d,bool input) const {
+        if(d.master)return 0;
+        auto common=input?memory->data->inputPadding.load():memory->data->padding.load();
+        auto needed=transportPadding(d.largestBlockFrames.load(),input);
+        return needed>common?needed-common:0;
+    }
     void observeBlock(uint32_t frames) {
         if(!frames)return;
         actualBuffer=frames;
-        auto padding=outputPaddingOverride>=0?uint32_t(outputPaddingOverride):std::max(uint32_t(std::ceil(double(memory->data->rate)/3000.0)),frames);
+        // Output starts a hardware block ahead of the callback and extends
+        // another block. A smaller, independently scheduled client has not
+        // necessarily rendered that tail yet. Delay the entire range into
+        // the past, not just its first frame. Capture also needs two blocks:
+        // one for relative phase and one for the producer to finish publishing.
+        auto padding=transportPadding(frames,false);
         // Short or variable blocks must not move the read position forward
         // again. Keep the largest observed margin until the next engine start.
         memory->data->padding=std::max(memory->data->padding.load(),padding);
-        memory->data->inputPadding=std::max(memory->data->inputPadding.load(),std::max(padding,frames));
+        memory->data->inputPadding=std::max(memory->data->inputPadding.load(),transportPadding(frames,true));
     }
     static OSStatus io(AudioDeviceID,const AudioTimeStamp* now,const AudioBufferList* input,const AudioTimeStamp* it,
         AudioBufferList* output,const AudioTimeStamp* ot,void* context) {
         auto entryHost=mach_absolute_time();
         auto& d=*static_cast<DeviceIO*>(context);auto& e=*d.owner;auto& shared=*e.memory->data;
+        ++d.callbacks;d.lastCallbackHost=entryHost;
         if(output)for(UInt32 b=0;b<output->mNumberBuffers;++b)if(output->mBuffers[b].mData)memset(output->mBuffers[b].mData,0,output->mBuffers[b].mDataByteSize);
         patch::RouteSlot<Routes>::Read routeRead(d.routes);
         const auto& inputRoutes=routeRead.value?routeRead.value->inputs:d.inputs;
@@ -93,13 +144,26 @@ public:
         // blocks or other interfaces.
         for(bool in:{true,false}) {
             auto buffers=in?input:output;auto& layout=in?d.inLayout:d.outLayout;
-            if((!buffers && !layout.empty()) || (buffers && buffers->mNumberBuffers!=layout.size())){++e.badBuffers;return noErr;}
+            if((!buffers && !layout.empty()) || (buffers && buffers->mNumberBuffers!=layout.size())){++e.badBuffers;++d.malformedBuffers;d.lastBufferErrorHost=entryHost;return noErr;}
             for(size_t b=0;b<layout.size();++b){auto& v=buffers->mBuffers[b];
-                if(!v.mData || !layout[b] || v.mNumberChannels!=layout[b] || v.mDataByteSize%(layout[b]*4)){++e.badBuffers;return noErr;}
-                auto n=v.mDataByteSize/(layout[b]*4);if(frames && n!=frames){++e.badBuffers;return noErr;}frames=n;
+                if(!v.mData || !layout[b] || v.mNumberChannels!=layout[b] || v.mDataByteSize%(layout[b]*4)){++e.badBuffers;++d.malformedBuffers;d.lastBufferErrorHost=entryHost;return noErr;}
+                auto n=v.mDataByteSize/(layout[b]*4);if(frames && n!=frames){++e.badBuffers;++d.malformedBuffers;d.lastBufferErrorHost=entryHost;return noErr;}frames=n;
             }
         }
-        if(!now || !(now->mFlags&kAudioTimeStampHostTimeValid) || !(now->mFlags&kAudioTimeStampSampleTimeValid))return noErr;
+        d.lastBlockFrames=frames;
+        d.largestBlockFrames=std::max(d.largestBlockFrames.load(),frames);
+        const auto inputChange=d.inputTimeline.observe(it,frames,!d.inLayout.empty());
+        const auto outputChange=d.outputTimeline.observe(ot,frames,!d.outLayout.empty());
+        if(inputChange.discontinuity){++d.inputTimelineJumps;d.lastInputSampleStep=inputChange.step;}
+        if(outputChange.discontinuity){++d.outputTimelineJumps;d.lastOutputSampleStep=outputChange.step;}
+        if(inputChange.discontinuity || outputChange.discontinuity) {
+            ++d.sampleDiscontinuities;d.lastTimelineChangeHost=entryHost;
+            d.lastSampleStep=inputChange.discontinuity?inputChange.step:outputChange.step;
+        }
+        if(inputChange.reset || outputChange.reset)++d.counterResets;
+        if(!now || !(now->mFlags&kAudioTimeStampHostTimeValid) || !(now->mFlags&kAudioTimeStampSampleTimeValid)){++d.invalidTimestamps;d.lastTimestampErrorHost=entryHost;return noErr;}
+        d.callbackClock.record(entryHost,now->mHostTime,now->mSampleTime);
+        d.rawSample=now->mSampleTime;
         if(d.master) {
             e.observeBlock(frames);
             double scalar=(now->mFlags&kAudioTimeStampRateScalarValid)?now->mRateScalar:1;
@@ -116,15 +180,19 @@ public:
                 shared.readPhase.record(true,next.sample,entryHost,e.nominalTicks,frames);
                 shared.writePhase.record(true,next.sample,entryHost,e.nominalTicks,frames);}
         }
-        patch::ClockSample clock;if(!d.clockReader.read(shared,clock))return noErr;
+        patch::ClockSample clock;if(!d.clockReader.read(shared,clock)){++d.clockUnavailable;return noErr;}
         if(!shared.active.load())return noErr;
         // A secondary's own sample counter can restart, for example when sync
         // lock sets its rate. Realign instead of writing to a stale timeline.
         if(!d.master && (!d.aligned || d.alignedEpoch!=clock.epoch || now->mSampleTime<d.previousSample)) {
             d.offset=std::llround(clock.sample+(double(now->mHostTime)-double(clock.host))/clock.ticks-now->mSampleTime);
             d.aligned=true;d.alignedEpoch=clock.epoch;
+            ++d.realignments;
         }
+        d.mappingOffset=d.offset;
         d.previousSample=now->mSampleTime;
+        auto validStamp=[](const AudioTimeStamp* t) { return t && (t->mFlags&kAudioTimeStampSampleHostTimeValid)==kAudioTimeStampSampleHostTimeValid; };
+        if((!inputRoutes.empty() && !validStamp(it)) || (!outputRoutes.empty() && !validStamp(ot))){++d.invalidTimestamps;d.lastTimestampErrorHost=entryHost;}
         if(!d.master) {
             double skew=clock.sample+(double(now->mHostTime)-double(clock.host))/clock.ticks-now->mSampleTime-d.offset;
             d.clockSkew=skew;
@@ -135,8 +203,9 @@ public:
         auto time=[&](const AudioTimeStamp* t) {
             return t->mSampleTime+d.offset;
         };
+        auto inputShift=d.extraInput+e.additionalPadding(d,true);
         if(it && (it->mFlags&kAudioTimeStampSampleTimeValid) && (it->mFlags&kAudioTimeStampHostTimeValid)) {
-            auto base=time(it)+d.extraInput;
+            auto base=time(it)+inputShift;
             for(auto& route:inputRoutes) {
                 auto source=static_cast<const float*>(input->mBuffers[route.source.buffer].mData)+route.source.channel;
                 for(uint32_t n=0;n<frames;++n) {
@@ -146,18 +215,24 @@ public:
             }
         }
         if(shared.timingEnabled && it && (it->mFlags&kAudioTimeStampSampleTimeValid))
-            shared.capturePublications[d.timingIndex].publish(std::llround(time(it)+d.extraInput),std::llround(time(it)+d.extraInput)+frames,mach_absolute_time());
+            shared.capturePublications[d.timingIndex].publish(std::llround(time(it)+inputShift),std::llround(time(it)+inputShift)+frames,mach_absolute_time());
         if(ot && (ot->mFlags&kAudioTimeStampSampleTimeValid) && (ot->mFlags&kAudioTimeStampHostTimeValid)) {
-            auto base=time(ot)-shared.padding-d.extraOutput;
+            auto base=time(ot)-shared.padding-d.extraOutput-e.additionalPadding(d,false);
+            uint64_t missing=0,checked=uint64_t(frames)*outputRoutes.size();
             if(shared.timingEnabled && !outputRoutes.empty())shared.playbackMargin.observe(shared.playbackPublications,std::llround(base),std::llround(base)+frames,mach_absolute_time(),clock.ticks);
             for(auto route:outputRoutes) {
                 auto dest=static_cast<float*>(output->mBuffers[route.dest.buffer].mData)+route.dest.channel;
                 for(uint32_t n=0;n<frames;++n) {
                     bool found;auto frame=base+n;auto f=int64_t(std::llround(frame));
                     float value=shared.playback.read(route.source,f,&found);
-                    dest[n*route.dest.stride]=value;if(!found)shared.playbackMisses.fetch_add(1,std::memory_order_relaxed);
+                    dest[n*route.dest.stride]=value;if(!found){shared.playbackMisses.fetch_add(1,std::memory_order_relaxed);++missing;}
                 }
             }
+            d.playbackSamples.fetch_add(checked,std::memory_order_relaxed);
+            d.playbackMissingSamples.fetch_add(missing,std::memory_order_relaxed);
+            // All-missing blocks can mean no client is playing. Keep their raw
+            // count, but only call a partially populated block incomplete.
+            if(missing && missing<checked){++d.partialPlaybackBlocks;d.lastIncompletePlaybackHost=entryHost;}
         }
         ++e.cycles;return noErr;
     }
@@ -344,7 +419,7 @@ public:
             }
         }
         if(!actualBuffer)throw std::runtime_error("Sync Source must be selected");
-        // One actual hardware block of transport delay; the callback corrects
+        // Two hardware blocks in each direction; the callback corrects
         // an unavailable startup buffer query before copying its first samples.
         if(auto raw=std::getenv("STUDIOPATCH_TEST_OUTPUT_PADDING")) {
             char* end=nullptr;auto value=std::strtoul(raw,&end,10);

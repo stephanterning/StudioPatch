@@ -121,6 +121,11 @@ char* SPStatus(){
  std::string warnings=driftFailed?R"(["Test secondary was not started (simulated aggregate start failure)."])":"[]";
  std::string diagnostics="{}";double skew=0;std::ifstream skewFile(root()+"/clock-skew");
  if(skewFile>>skew)diagnostics=R"({\"devices\":[{\"deviceID\":2,\"master\":false,\"clockSkewFrames\":)"+std::to_string(skew)+R"(,\"peakClockSkewFrames\":)"+std::to_string(skew)+R"(}]})";
+ std::ifstream diagnosticValues(root()+"/diagnostic-values");
+ if(diagnosticValues.good()) {
+  std::ostringstream raw;raw<<diagnosticValues.rdbuf();diagnostics.clear();
+  for(char c:raw.str()){if(c=='"' || c=='\\')diagnostics+='\\';if(c=='\n')diagnostics+="\\n";else diagnostics+=c;}
+ }
  return reply(std::string("{\"running\":")+(running?"true":"false")+",\"stale\":"+(flag("stale-hardware")?"true":"false")+",\"driftCompensatedUIDs\":"+compensated+",\"warnings\":"+warnings+",\"cycles\":1,\"badBuffers\":0,\"bufferFrames\":64,\"latencyDiagnostics\":\""+diagnostics+"\"}");
 }
 char* SPSetChannelNames(const char* raw){

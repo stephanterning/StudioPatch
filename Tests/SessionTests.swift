@@ -7,6 +7,29 @@ import AppKit
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("StudioPatch-tests-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at:directory) }
         let url = directory.appendingPathComponent("last-session.json")
+        let counterURL=directory.appendingPathComponent("counters/session.json")
+        let counterModel=Model(store:SessionStore(url:counterURL),discoverDevices:false)
+        let counterRecorder=AudioDiagnosticRecorder(directory:directory.appendingPathComponent("unused-counter-log"))
+        let counterRaw="""
+        {"diagnosticSchemaVersion":1,"timelineCounterVersion":2,"generation":41,"devices":[{"uid":"counter-device","master":true,"bufferErrors":2,"timelineJumps":3,"incompletePlaybackBlocks":3,"missingPlaybackSamples":1818550}]}
+        """
+        counterModel.diagnostics=counterRecorder.observe(raw:counterRaw,fresh:true,devices:[])
+        counterModel.health = .warning;counterModel.message="Existing audio warning"
+        let sessionBeforeReset=try Data(contentsOf:counterURL),engineBeforeReset=try counterModel.preset.encoded(forEngine:true)
+        precondition(counterModel.canResetDiagnosticCounters)
+        counterModel.resetDiagnosticCounters()
+        precondition(counterModel.diagnosticCounterNotice.isEmpty && counterModel.diagnosticCounterResetDate != nil)
+        precondition(counterModel.displayedDiagnostics?.total("missingPlaybackSamples")==0 && counterModel.diagnostics?.total("missingPlaybackSamples")==1818550)
+        precondition(counterModel.health == .warning && counterModel.message=="Existing audio warning")
+        precondition((try? Data(contentsOf:counterURL))==sessionBeforeReset && (try? counterModel.preset.encoded(forEngine:true))==engineBeforeReset)
+        let reopenedCounters=Model(store:SessionStore(url:counterURL),discoverDevices:false)
+        reopenedCounters.diagnostics=counterModel.diagnostics
+        precondition(reopenedCounters.displayedDiagnostics?.total("incompletePlaybackBlocks")==0 && reopenedCounters.diagnosticCounterResetDate==counterModel.diagnosticCounterResetDate)
+        reopenedCounters.diagnostics?.devices[0].totals["incompletePlaybackBlocks"]=5
+        precondition(reopenedCounters.displayedDiagnostics?.total("incompletePlaybackBlocks")==2)
+        reopenedCounters.diagnostics?.fresh=false;reopenedCounters.resetDiagnosticCounters()
+        precondition(!reopenedCounters.canResetDiagnosticCounters && !reopenedCounters.diagnosticCounterNotice.isEmpty)
+        precondition(reopenedCounters.displayedDiagnostics?.total("incompletePlaybackBlocks")==2)
         let app = Model(store:SessionStore(url:url),discoverDevices:false)
         app.preset.inputCount = 37
         app.preset.outputCount = 21

@@ -222,5 +222,87 @@ int main() {
     NSDictionary* drifting=@{@"devices":@[@{@"uid":@"a",@"drift":@YES,@"syncLocked":@YES}],@"followMaster":@YES,@"bufferFrames":@64,@"inputs":@[]};
     assert([DirectEngine::graphOf(locked) isEqual:DirectEngine::graphOf(unlocked)]);
     assert(![DirectEngine::graphOf(locked) isEqual:DirectEngine::graphOf(drifting)]);
+    // Attribute skipped/missing blocks to their own interface. These counters
+    // must not change the samples delivered by a subsequent valid callback.
+    DirectEngine::DeviceIO observed;observed.owner=&e;observed.master=true;
+    observed.inLayout={2};observed.outLayout={2};observed.inputs={{{0,1,2},2}};observed.outputs={{1,{0,0,2}}};
+    auto dn=now,di=it,dout=ot;dn.mSampleTime=100000;di.mSampleTime=99800;dout.mSampleTime=100100;
+    auto played=int64_t(dout.mSampleTime-shared.padding);
+    shared.playback.write(1,played,.375f);
+    DirectEngine::io(0,&dn,&input,&di,&output,&dout,&observed);
+    assert(out[0]==.375f && out[2]==0 && shared.capture.read(2,99800)==2);
+    assert(observed.partialPlaybackBlocks==1 && observed.playbackMissingSamples==1 && observed.playbackSamples==2);
+    // An all-missing block is retained as raw evidence, not called incomplete.
+    dout.mSampleTime+=2;dn.mSampleTime+=2;
+    DirectEngine::io(0,&dn,&input,&di,&output,&dout,&observed);
+    assert(observed.partialPlaybackBlocks==1 && observed.playbackMissingSamples==3);
+    dn.mFlags=0;DirectEngine::io(0,&dn,&input,&di,&output,&dout,&observed);
+    assert(observed.invalidTimestamps==1 && shared.active);
+    dn.mFlags=now.mFlags;dn.mSampleTime+=2;
+    input.mBuffers[0].mNumberChannels=1;DirectEngine::io(0,&dn,&input,&di,&output,&dout,&observed);
+    assert(observed.malformedBuffers==1 && shared.active);
+    input.mBuffers[0].mNumberChannels=2;
+    shared.playback.write(1,played+2,.625f);shared.playback.write(1,played+3,-.625f);
+    DirectEngine::io(0,&dn,&input,&di,&output,&dout,&observed);
+    assert(out[0]==.625f && out[2]==-.625f && shared.active);
+    dn.mSampleTime-=100;di.mSampleTime-=100;dout.mSampleTime-=100;
+    DirectEngine::io(0,&dn,&input,&di,&output,&dout,&observed);
+    assert(observed.counterResets==1 && observed.sampleDiscontinuities>=1 && observed.lastCallbackHost>0);
+    assert(skewed.malformedBuffers==0 && d.malformedBuffers==1); // Independent attribution.
+
+    // The same scheduling variation measured on real hardware must not look
+    // like missing audio. Input/output frame ranges remain contiguous while
+    // callback wake-up timestamps vary, and samples still pass both ways.
+    DirectEngine::DeviceIO continuous;continuous.owner=&e;continuous.master=true;
+    continuous.inLayout={2};continuous.outLayout={2};continuous.inputs={{{0,1,2},2}};continuous.outputs={{1,{0,0,2}}};
+    dn=now;di=it;dout=ot;
+    auto deliver=[&] {
+        auto first=int64_t(dout.mSampleTime-shared.padding);
+        shared.playback.write(1,first,.125f);shared.playback.write(1,first+1,-.125f);
+        DirectEngine::io(0,&dn,&input,&di,&output,&dout,&continuous);
+        assert(shared.active && out[0]==.125f && out[2]==-.125f);
+        if(di.mFlags&kAudioTimeStampSampleTimeValid)assert(shared.capture.read(2,int64_t(di.mSampleTime))==2);
+    };
+    for(int n=0;n<40;++n) {
+        dn.mSampleTime=12000+2*n+(n%2);dn.mHostTime+=500+(n%3)*17;
+        di.mSampleTime=10000+2*n;dout.mSampleTime=11000+2*n;
+        di.mHostTime+=500+(n%5)*7;dout.mHostTime+=500+(n%7)*11;
+        deliver();
+        assert(continuous.sampleDiscontinuities==0 && continuous.counterResets==0);
+    }
+    auto advance=[&] {dn.mSampleTime+=2;dn.mHostTime+=500;di.mSampleTime+=2;dout.mSampleTime+=2;};
+    advance();++dout.mSampleTime;deliver(); // A real one-frame gap in output only.
+    assert(continuous.sampleDiscontinuities==1 && continuous.outputTimelineJumps==1 && continuous.inputTimelineJumps==0);
+    assert(continuous.lastOutputSampleStep==1);
+    advance();deliver();assert(continuous.sampleDiscontinuities==1); // No repeated/latching event.
+    advance();++di.mSampleTime;deliver();
+    assert(continuous.sampleDiscontinuities==2 && continuous.inputTimelineJumps==1 && continuous.lastInputSampleStep==1);
+    advance();dout.mSampleTime-=2;deliver(); // Duplicate output block: two-frame overlap.
+    assert(continuous.sampleDiscontinuities==3 && continuous.outputTimelineJumps==2 && continuous.lastOutputSampleStep==-2);
+    advance();di.mSampleTime=0;deliver(); // The input counter actually restarted.
+    assert(continuous.sampleDiscontinuities==4 && continuous.counterResets==1 && continuous.inputTimelineJumps==2);
+    advance();++di.mSampleTime;++dout.mSampleTime;deliver();
+    assert(continuous.sampleDiscontinuities==5 && continuous.inputTimelineJumps==3 && continuous.outputTimelineJumps==3);
+    advance();deliver();assert(continuous.sampleDiscontinuities==5); // Both directions count once per callback.
+    advance();di.mFlags=kAudioTimeStampHostTimeValid;deliver();
+    assert(continuous.sampleDiscontinuities==5 && continuous.invalidTimestamps==1);
+    advance();di.mFlags=it.mFlags;di.mSampleTime+=10000;deliver();
+    assert(continuous.sampleDiscontinuities==5); // Unknown input time starts a new baseline.
+    advance();++di.mSampleTime;deliver();assert(continuous.sampleDiscontinuities==6);
+
+    // Variable block lengths use the preceding block's actual end, and
+    // unavailable/invalid directions cannot establish or bridge a baseline.
+    DirectEngine::BufferTimeline variable;AudioTimeStamp edge=it;
+    edge.mSampleTime=100;assert(!variable.observe(&edge,32,true).discontinuity);
+    edge.mSampleTime=132;assert(!variable.observe(&edge,64,true).discontinuity);
+    edge.mSampleTime=196;assert(!variable.observe(&edge,16,true).discontinuity);
+    edge.mSampleTime=213;auto gap=variable.observe(&edge,32,true);assert(gap.discontinuity && gap.step==1 && !gap.reset);
+    assert(!variable.observe(nullptr,32,true).discontinuity);
+    edge.mSampleTime=1000;assert(!variable.observe(&edge,32,true).discontinuity);
+    assert(!variable.observe(&edge,32,false).discontinuity && !variable.valid);
+    for(double invalid:{double(NAN),double(INFINITY),double(-INFINITY),double(INT64_MAX),double(INT64_MIN)}) {
+        edge.mSampleTime=invalid;assert(!variable.observe(&edge,32,true).discontinuity && !variable.valid);
+    }
+    edge.mSampleTime=100;assert(!variable.observe(&edge,0,true).discontinuity && !variable.valid);
     std::cout<<"PASS: cross-process samples, direct independent routing, fan-out, physical clock, isolated bad blocks, silent unavailable routes and wrap validation\n";
 }

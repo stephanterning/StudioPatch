@@ -456,11 +456,27 @@ extern "C" char* SPStatus() { @autoreleasepool {
         };
         NSMutableArray* deviceTiming=[NSMutableArray array];uint32_t masterIn=0,masterOut=0;
         for(auto& d:engine->devices)if(d->master){masterIn=d->physicalInputLatency;masterOut=d->physicalOutputLatency;}
-        for(auto& d:engine->devices)[deviceTiming addObject:@{@"deviceID":@(d->physical),@"master":@(d->master),
+        auto snapshotHost=mach_absolute_time();
+        for(auto& d:engine->devices) {
+            const auto last=d->lastCallbackHost.load();
+            [deviceTiming addObject:@{@"deviceID":@(d->physical),@"uid":@(d->uid.c_str()),@"master":@(d->master),
+            @"callbackCount":@(d->callbacks.load()),@"lastCallbackHost":@(last),
+            @"callbackClock":observation(d->callbackClock),
+            @"blockFrames":@(d->lastBlockFrames.load()),
+            @"lastEventHosts":@{@"buffer":@(d->lastBufferErrorHost.load()),@"timestamp":@(d->lastTimestampErrorHost.load()),
+                @"timeline":@(d->lastTimelineChangeHost.load()),@"playback":@(d->lastIncompletePlaybackHost.load())},
+            @"lastCallbackAgeMs":last?@(double(snapshotHost>last?snapshotHost-last:0)*1000/(engine->nominalTicks*state.rate)):(id)NSNull.null,
+            @"bufferErrors":@(d->malformedBuffers.load()),@"timestampErrors":@(d->invalidTimestamps.load()),@"clockUnavailable":@(d->clockUnavailable.load()),
+            @"counterResets":@(d->counterResets.load()),@"timelineJumps":@(d->sampleDiscontinuities.load()),@"realignments":@(d->realignments.load()),
+            @"inputTimelineJumps":@(d->inputTimelineJumps.load()),@"outputTimelineJumps":@(d->outputTimelineJumps.load()),
+            @"lastInputSampleStepFrames":@(d->lastInputSampleStep.load()),@"lastOutputSampleStepFrames":@(d->lastOutputSampleStep.load()),
+            @"playbackSamples":@(d->playbackSamples.load()),@"missingPlaybackSamples":@(d->playbackMissingSamples.load()),@"incompletePlaybackBlocks":@(d->partialPlaybackBlocks.load()),
+            @"mappingOffsetFrames":@(d->mappingOffset.load()),@"lastSampleStepFrames":@(d->lastSampleStep.load()),@"rawSample":@(d->rawSample.load()),
             @"clockSkewFrames":@(d->clockSkew.load()),@"peakClockSkewFrames":@(d->peakClockSkew.load()),
-            @"inputSkewFrames":@(int64_t(d->physicalInputLatency)+d->extraInput-masterIn),
-            @"outputSkewFrames":@(int64_t(d->physicalOutputLatency)+d->extraOutput-masterOut)}];
-        auto values=@{@"devices":deviceTiming,@"transport":@"direct shared memory",@"timingEnabled":@(state.timingEnabled),@"routingUpdates":@(engine->routingUpdates.load()),@"generation":@(engine->generation),@"rate":@(state.rate),@"readPhase":phase(state.readPhase),@"writePhase":phase(state.writePhase),
+            @"inputSkewFrames":@(int64_t(d->physicalInputLatency)+d->extraInput+engine->additionalPadding(*d,true)-masterIn),
+            @"outputSkewFrames":@(int64_t(d->physicalOutputLatency)+d->extraOutput+engine->additionalPadding(*d,false)-masterOut)}];
+        }
+        auto values=@{@"diagnosticSchemaVersion":@1,@"timelineCounterVersion":@2,@"snapshotHost":@(snapshotHost),@"ticksPerFrame":@(engine->nominalTicks),@"clockEpoch":@(state.clockEpoch.load()),@"devices":deviceTiming,@"transport":@"direct shared memory",@"timingEnabled":@(state.timingEnabled),@"routingUpdates":@(engine->routingUpdates.load()),@"generation":@(engine->generation),@"rate":@(state.rate),@"readPhase":phase(state.readPhase),@"writePhase":phase(state.writePhase),
             @"captureMarginHistogram":histogram(state.captureMargin),@"playbackMarginHistogram":histogram(state.playbackMargin),
             @"captureMarginReads":@(state.captureMargin.reads.load()),@"playbackMarginReads":@(state.playbackMargin.reads.load()),
             @"captureMarginMinTicks":@(state.captureMargin.minimumTicks.load()),@"playbackMarginMinTicks":@(state.playbackMargin.minimumTicks.load()),

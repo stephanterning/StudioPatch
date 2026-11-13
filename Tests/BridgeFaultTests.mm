@@ -181,25 +181,26 @@ int main() { @autoreleasepool {
     AudioTimeStamp now{},it{},ot{};now.mFlags=it.mFlags=ot.mFlags=kAudioTimeStampHostTimeValid|kAudioTimeStampSampleTimeValid;
     for(int cycle=0;cycle<6;++cycle) {
         uint32_t frames=cycle<3?64:128;int64_t base=10000+256*cycle;
-        for(uint32_t i=0;i<frames;++i){shared.playback.write(0,base+i,0.25f);input[2*i]=0.125f;}
+        for(uint32_t i=0;i<frames;++i){shared.playback.write(0,base-frames+i,0.25f);input[2*i]=0.125f;}
         now.mSampleTime=it.mSampleTime=base;ot.mSampleTime=base+frames;
         now.mHostTime=it.mHostTime=100000000+256*cycle*250;ot.mHostTime=now.mHostTime+frames*250;
         AudioBufferList in{1,{{2,frames*8,input}}},out{1,{{2,frames*8,output}}};
         DirectEngine::io(0,&now,&in,&it,&out,&ot,&device);
         for(uint32_t i=0;i<frames;++i)assert(output[2*i]==0.25f && output[2*i+1]==0 && shared.capture.read(0,base+i)==0.125f);
-        assert(shared.padding==frames && shared.inputPadding==frames);
+        assert(shared.padding==2*frames && shared.inputPadding==2*frames);
+        assert(samples.latency(true)==2*frames && samples.latency(false)==2*frames);
     }
     // Variable/short blocks keep a stable read position after the maximum
     // block has been seen. A ramp exposes skipped or repeated samples.
     int64_t base=20000;
-    for(int64_t frame=base;frame<base+2048;++frame)shared.playback.write(0,frame,float(frame-base+1));
+    for(int64_t frame=base-128;frame<base+2048;++frame)shared.playback.write(0,frame,float(frame-(base-128)+1));
     for(uint32_t frames:{128,32,64,16,128}) {
         now.mSampleTime=it.mSampleTime=base;ot.mSampleTime=base+128;
         now.mHostTime=it.mHostTime=200000000+base*250;ot.mHostTime=now.mHostTime+128*250;
         AudioBufferList in{1,{{2,frames*8,input}}},out{1,{{2,frames*8,output}}};
         DirectEngine::io(0,&now,&in,&it,&out,&ot,&device);
         for(uint32_t i=0;i<frames;++i)assert(output[2*i]==float(base+i-20000+1));
-        assert(shared.padding==128 && shared.inputPadding==128);
+        assert(shared.padding==256 && shared.inputPadding==256);
         base+=frames;
     }
     std::cout<<"PASS: secondary lookup warning, unconfirmed Sync Source rate, unreadable latency, latency-only changes, live buffer sample delivery, configuration acknowledgement and contained timing confirmation\n";

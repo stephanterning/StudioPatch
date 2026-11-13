@@ -1,29 +1,30 @@
 # Latency
 
-StudioPatch aims to add **at most about 1 ms of round-trip latency** compared with using the Sync Source interface directly, while reporting its latency correctly to the DAW and without losing audio. This page summarizes what has been measured and how to measure it yourself.
+StudioPatch aims for low added latency while reporting it correctly to the DAW and preserving audio across different hardware and client buffer sizes. The November 12–13 buffer fix covers the complete hardware output block and reserves a full capture callback budget in addition to its phase margin. The current policy below is distinct from the earlier hardware measurements.
 
 ## How much latency StudioPatch adds
 
 StudioPatch adds a fixed software margin in each direction:
 
 ```text
-margin per direction = max(ceil(sampleRate / 3000), engine I/O buffer) frames
+capture margin = max(ceil(sampleRate / 3000), 2 × engine I/O buffer) frames
+playback margin = max(ceil(sampleRate / 3000), 2 × engine I/O buffer) frames
 ```
 
 With the default engine I/O buffer of 32 samples:
 
 | Sample rate | Margin in / out | Added round trip |
 |---|---:|---:|
-| 96 kHz | 32 / 32 frames | 64 frames = **0.667 ms** |
-| 48 kHz | 32 / 32 frames | 64 frames = **1.333 ms** |
+| 96 kHz | 64 / 64 frames | 128 frames = **1.333 ms** |
+| 48 kHz | 64 / 64 frames | 128 frames = **2.667 ms** |
 
-A larger engine I/O buffer increases both margins (64 samples → 64 + 64 frames). This is the buffer StudioPatch uses towards the hardware, set under **Advanced** in the panel. Your DAW's buffer is separate and adds the same latency with or without StudioPatch.
+A larger engine I/O buffer increases both margins (64 samples → 128 + 128 frames; 1024 samples → 2048 + 2048 frames). These are calculated transport delays, not new physical-loopback measurements. This is the buffer StudioPatch uses towards the hardware, set under **Advanced** in the panel. Your DAW's buffer is separate. A secondary with larger actual blocks gets the additional margin only on its own routes; the Sync Source latency is unchanged by that secondary.
 
-The 48 kHz result misses the 1 ms target on purpose. A 16-frame output margin measured 1.0 ms but produced short bursts of corrupted playback under heavy CPU load, so the margin is never smaller than one engine buffer. A lower-latency mode would need its own qualification.
+Playback needs two blocks because the hardware requests a block ahead of the current cycle, and the end of that block may not yet have been produced by a smaller, independently scheduled client. Capture needs a full block for relative callback phase plus another block for the producer to finish publishing: a late or still-running physical callback can otherwise leave the requested input tail unwritten, even with perfectly contiguous sample timestamps. Smaller playback margins require their own qualification; increasing the buffer alone did not fix this scheduling error.
 
-## Measured results
+## Earlier measured results (one-block playback margin)
 
-Measured with a physical cable from analog output 3 to analog input 3 on an RME UFX III (Sync Source), with an Allen & Heath ZED-R16 also selected as a clock-locked secondary interface. Engine I/O buffer 32, measurement client buffer 256.
+These measurements predate the November 12 buffer fix and must not be treated as measurements of its two-block playback margin. They used a physical cable from analog output 3 to analog input 3 on an RME UFX III (Sync Source), with an Allen & Heath ZED-R16 also selected as a clock-locked secondary interface. Engine I/O buffer 32, measurement client buffer 256.
 
 | Sample rate | Direct UFX III round trip | Through StudioPatch | Added |
 |---|---:|---:|---:|
@@ -51,7 +52,7 @@ Safety offsets equal the Sync Source's. The DAW adds its own buffer on top, as w
 
 Reporting always refers to the **Sync Source**. A route from a secondary interface can have a different real latency; the panel's **Advanced** section shows each secondary interface's calculated difference. These are estimates from reported values, not measurements of the analog path.
 
-Expected DAW figures at 256 samples, with a five-sample error compensation for the UFX III: about **7.59 ms** overall at 96 kHz and **13.85 ms** at 48 kHz.
+The earlier one-block policy gave DAW figures at 256 samples, with a five-sample error compensation for the UFX III, of about **7.59 ms** overall at 96 kHz and **13.85 ms** at 48 kHz. The new policy adds one more engine block in each direction; those old figures are not current measurements.
 
 ## Measuring latency
 
