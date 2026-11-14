@@ -92,18 +92,34 @@ import Foundation
             precondition(rows.contains {$0["kind"] as? String == "observation"})
             let observation=rows.first {$0["kind"] as? String == "observation"}!
             precondition((observation["diagnostics"] as? [String:Any])?["timelineCounterVersion"] as? Int == 2)
+            let transport=observation["transport"] as! [String:Any]
+            precondition(transport["playbackPublications"] == nil && transport["playbackReadFailures"] == nil)
         }
         // A replacement service preserves the previous process's history and
         // records a distinct identity even if the engine generation repeats.
         let replacement=AudioDiagnosticRecorder(directory:recorder.directory,maxFileBytes:3000,maxFiles:2)
         let replacementSummary=replacement.observe(raw:try raw(2,timelineVersion:2),fresh:true,devices:[device])
         precondition(replacementSummary.serviceID != summary.serviceID)
-        let status=RuntimeSnapshot(devices:[device],installed:true,running:true,health:.healthy,message:"Routing active",rate:96000,diagnostics:replacementSummary)
+        let publications:[String:Any]=["observed":321,"forwardJumps":1,"forwardJumpFrames":384,
+            "lastForwardJump":["valid":true,"host":UInt64(7247004470047),"first":1024,"end":1408],
+            "lastBackwardJump":["valid":false]]
+        let missing:[String:Any]=["valid":true,"host":UInt64(7247004541830),"frame":1200,"channel":2,"tagAfterRead":-1]
+        let timing:[String:Any]=["timingEnabled":true,"playbackPublications":publications,
+            "devices":[["uid":"zed","lastMissingPlayback":missing],["uid":"ufx"]]]
+        let timingRaw=String(decoding:try JSONSerialization.data(withJSONObject:timing),as:UTF8.self)
+        let status=RuntimeSnapshot(devices:[device],installed:true,running:true,health:.healthy,message:"Routing active",rate:96000,latencyDiagnostics:timingRaw,diagnostics:replacementSummary)
         replacement.record(status,configuration:configuration,uptime:20);replacement.flush()
         files=try AudioDiagnosticRecorder.logFiles(in:recorder.directory)
         precondition(files.count==2)
         let identities=Set(try records(files).compactMap {$0["serviceID"] as? String})
         precondition(identities.contains(recorder.serviceID) && identities.contains(replacement.serviceID))
+        func checkPlaybackTiming(_ rows:[[String:Any]]) {
+            let observation=rows.first {$0["kind"] as? String == "observation" && $0["serviceID"] as? String == replacement.serviceID}!
+            let transport=observation["transport"] as! [String:Any]
+            precondition(transport["playbackPublications"] as? NSDictionary == publications as NSDictionary)
+            precondition(transport["playbackReadFailures"] as? NSArray == [["uid":"zed","lastMissingPlayback":missing]] as NSArray)
+        }
+        checkPlaybackTiming(try records(files))
 
         try JSONEncoder().encode(status).write(to:root.appendingPathComponent("runtime-status.json"))
         try Data(configuration.utf8).write(to:root.appendingPathComponent("last-session.json"))
@@ -123,6 +139,7 @@ import Foundation
         let exported=try FileManager.default.contentsOfDirectory(at:report,includingPropertiesForKeys:nil).filter {$0.pathExtension=="jsonl"}
         let exportedRecords=try records(exported)
         precondition(!exportedRecords.isEmpty)
+        checkPlaybackTiming(exportedRecords)
         // A full/unwritable log destination is reported without an audio action.
         let blocked=root.appendingPathComponent("blocked");try Data().write(to:blocked)
         let failed=AudioDiagnosticRecorder(directory:blocked)

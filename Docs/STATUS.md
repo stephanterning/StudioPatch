@@ -1,5 +1,17 @@
 # Project status
 
+## Multiple audio clients — 2026-11-14 investigation
+
+Clicks at 1024 engine frames occurred with concurrent Ableton Live (512 frames) and Safari WebKit (128 frames) use of StudioPatch. With Safari closed, the same engine generation processed 8,625 callbacks per interface over about 92 seconds with zero new capture/playback misses or physical callback errors; the owner also reported that the clicks disappeared. Concurrent applications must remain supported, so closing Safari is a diagnostic comparison, not the product solution.
+
+Local changes fix a reproduced backwards virtual-clock period and reduce direct-driver buffer copy cost by traversing the planar storage by channel. Five affected suites pass (core, direct, transport timing, bridge faults and diagnostics). Both driver changes remain uninstalled, and their effect on the audible multi-client case is unverified. A signed service-only diagnostic build was activated with the owner's approval to measure HAL publication discontinuities and failed playback reads without changing shared-memory layout or audio behavior.
+
+The approved 60-second measurement with Ableton and a newly started Safari client observed 45,000 consecutive mix publications and 5,625 callbacks per interface with no new missing frames or publication/physical timeline jumps. Timing was then disabled by the second approved service restart; another 40 seconds with both clients present was also clean. This did not reproduce the ongoing fault and is not verification of a fix. The updated diagnostic service remains installed with extra timing disabled; driver/broker and saved session/preset/label hashes are unchanged. The tested driver artifact is signed and staged under `build/multiclient-driver/`, not installed.
+
+A subsequent owner-approved 1024 → 32 → 1024 buffer cycle kept both clients active. The 30-second 32-frame and 60-second 1024-frame measurement windows had no new missing samples or physical callback errors. Core Audio errors and initial partial blocks were confined to the configuration transitions. The panel restored 1024 frames and the saved session exactly matches its pre-test contents. Safari probably displayed the same page, but its browser/tab session had been restarted, so the original failing state was not reproduced.
+
+See [the investigation record](history/BUFFER-INVESTIGATION-2026-11-14.md) for measured comparisons, limitations and evidence paths. The earlier transport fixture tests a single mixed producer; it does not qualify Core Audio's actual multi-client mixing and recovery behavior.
+
 ## Large hardware buffers — 2026-11-12–13
 
 Implemented and activated two transport scheduling corrections. The old one-block playback margin could request the end of a hardware output block before an independently scheduled, smaller client had produced it. A deterministic fixture using the real driver handler and engine callback reproduced 8,192 missing playback samples out of 16,384 with 64-frame hardware and a 32-frame client. Capture also needed room for both callback phase and the producer's full block-completion budget: the first playback-only correction still produced audible capture loss at 1024 frames. A subsequent small capture guard sounded clean to the owner but still accumulated 30,220 missing capture samples in 30 seconds. These are software scheduling defects; the measurements do not establish hardware clock-lock status.

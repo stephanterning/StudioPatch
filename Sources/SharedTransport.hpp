@@ -84,7 +84,10 @@ struct HardwareTimeline {
     bool get(const SharedTransport& transport,uint64_t now,double& outSample,uint64_t& outHost,uint64_t& outEpoch) {
         ClockSample c;if(!reader.read(transport,c))return false;
         auto next=std::floor((c.sample+(double(now)-double(c.host))/c.ticks)/RingFrames)*RingFrames;
-        if(!valid || next!=sample || epoch!=c.epoch) {
+        // Clock snapshots can revise the projected boundary slightly. Keep a
+        // period already reported to HAL until the clock advances beyond it;
+        // moving backwards is only valid with a new timestamp epoch/seed.
+        if(!valid || next>sample || epoch!=c.epoch) {
             sample=next;host=uint64_t(std::max(0.0,double(c.host)+(sample-c.sample)*c.ticks));
             epoch=c.epoch;valid=true;
         }

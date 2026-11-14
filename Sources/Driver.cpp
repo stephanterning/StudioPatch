@@ -76,7 +76,9 @@ public:
                     shared.captureMargin.observe(shared.capturePublications[owner],start,start+size/4/count,mach_absolute_time(),clock.ticks>0?clock.ticks:session_->ticksPerFrame);
                 }
             }
-            for(uint32_t n=0;n<size/4/count;++n)for(uint32_t c=0;c<count;++c) {
+            // SharedPlane is planar. Walk each channel's contiguous frame
+            // slots before crossing the large channel stride.
+            for(uint32_t c=0;c<count;++c)for(uint32_t n=0;n<size/4/count;++n) {
                 bool found;dest[n*count+c]=shared.capture.read(c,start+n,&found);
                 if(!found)shared.captureMisses.fetch_add(1,std::memory_order_relaxed);
             }
@@ -101,7 +103,7 @@ public:
             auto& shared=*session_->direct->data;auto count=session_->config.outputs;
             if(!shared.active.load() || !count || size%(count*4))return;
             auto source=static_cast<const float*>(data);auto start=int64_t(std::llround(time));
-            for(uint32_t n=0;n<size/4/count;++n)for(uint32_t c=0;c<count;++c)shared.playback.write(c,start+n,source[n*count+c]);
+            for(uint32_t c=0;c<count;++c)for(uint32_t n=0;n<size/4/count;++n)shared.playback.write(c,start+n,source[n*count+c]);
             if(shared.timingEnabled)shared.playbackPublications.publish(start,start+size/4/count,mach_absolute_time());
             return;
         }

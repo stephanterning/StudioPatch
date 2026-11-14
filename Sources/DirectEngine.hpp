@@ -21,6 +21,57 @@ public:
             return change;
         }
     };
+    struct PlaybackEvent {
+        struct Snapshot {bool valid=false;int64_t first=0,end=0,tag=-1;uint64_t host=0;uint32_t channel=0;};
+        std::atomic<uint64_t> sequence{0},host{0};
+        std::atomic<int64_t> first{0},end{0},tag{-1};std::atomic<uint32_t> channel{0};
+        void record(int64_t begin,int64_t limit,uint64_t when,uint32_t source=0,int64_t observedTag=-1) {
+            ++sequence;first=begin;end=limit;host=when;channel=source;tag=observedTag;++sequence;
+        }
+        Snapshot snapshot() const {
+            for(int attempt=0;attempt<3;++attempt) {
+                const auto before=sequence.load();if(before&1)continue;
+                Snapshot result{false,first.load(),end.load(),tag.load(),host.load(),channel.load()};
+                if(sequence.load()==before){result.valid=result.host!=0;return result;}
+            }
+            return {};
+        }
+    };
+    // Service-local observer of the existing driver publication log. Losing
+    // log entries breaks the baseline; it is not evidence of missing audio.
+    struct PlaybackPublicationTimeline {
+        uint64_t cursor=0;bool valid=false;int64_t previousEnd=0;
+        std::atomic<uint64_t> observed{0},lostRecords{0},unavailableRecords{0};
+        std::atomic<uint64_t> gaps{0},gapFrames{0},overlaps{0},overlapFrames{0};
+        PlaybackEvent lastGap,lastOverlap;
+        void observe(const patch::PublicationLog& log) {
+            const auto count=log.count.load();
+            if(count<cursor){cursor=0;valid=false;}
+            const auto oldest=count>log.slots.size()?count-log.slots.size():0;
+            if(cursor<oldest){lostRecords.fetch_add(oldest-cursor);cursor=oldest;valid=false;}
+            // At most the retained 256 records, with no retry or waiting for
+            // a producer that is currently replacing a slot.
+            while(cursor<count) {
+                const auto index=cursor++;const auto& slot=log.slots[index%log.slots.size()];
+                const auto sequence=slot.sequence.load();
+                const auto first=slot.first.load(),end=slot.end.load();const auto host=slot.host.load();
+                if(sequence!=2*index+2 || slot.sequence.load()!=sequence || end<=first) {
+                    ++unavailableRecords;valid=false;continue;
+                }
+                ++observed;
+                if(valid && first>previousEnd) {
+                    ++gaps;gapFrames.fetch_add(uint64_t(first)-uint64_t(previousEnd));
+                    lastGap.record(previousEnd,first,host);
+                } else if(valid && first<previousEnd) {
+                    ++overlaps;overlapFrames.fetch_add(uint64_t(previousEnd)-uint64_t(first));
+                    lastOverlap.record(first,previousEnd,host);
+                }
+                // These are consecutive-range steps, not a union-of-coverage
+                // measurement: contained overlaps and later fills also step.
+                previousEnd=end;valid=true;
+            }
+        }
+    };
     NSDictionary* graph=nil;
     std::atomic<uint64_t> routingUpdates{0};
     struct DeviceIO {
@@ -37,6 +88,7 @@ public:
         std::atomic<uint64_t> counterResets{0},sampleDiscontinuities{0},realignments{0};
         std::atomic<uint64_t> inputTimelineJumps{0},outputTimelineJumps{0};
         std::atomic<uint64_t> playbackSamples{0},playbackMissingSamples{0},partialPlaybackBlocks{0};
+        PlaybackEvent lastMissingPlayback;
         std::atomic<double> mappingOffset{0},lastSampleStep{0},rawSample{0};
         std::atomic<double> lastInputSampleStep{0},lastOutputSampleStep{0};
         std::atomic<uint32_t> lastBlockFrames{0};
@@ -55,6 +107,7 @@ public:
     std::shared_ptr<patch::SharedMapping> memory;
     std::vector<std::unique_ptr<DeviceIO>> devices;
     std::atomic<uint64_t> cycles{0},badBuffers{0};
+    PlaybackPublicationTimeline playbackPublications;
     std::vector<std::string> deviceWarnings;std::string routeWarning;
     AudioDeviceID syncSource=0;
     std::atomic<uint32_t> actualBuffer{0};
@@ -166,6 +219,7 @@ public:
         d.rawSample=now->mSampleTime;
         if(d.master) {
             e.observeBlock(frames);
+            if(shared.timingEnabled)e.playbackPublications.observe(shared.playbackPublications);
             double scalar=(now->mFlags&kAudioTimeStampRateScalarValid)?now->mRateScalar:1;
             if(!std::isfinite(scalar) || scalar<=0)scalar=1;
             patch::ClockSample next{now->mSampleTime+d.offset,e.nominalTicks*scalar,now->mHostTime,d.previousClock.epoch};
@@ -225,7 +279,17 @@ public:
                 for(uint32_t n=0;n<frames;++n) {
                     bool found;auto frame=base+n;auto f=int64_t(std::llround(frame));
                     float value=shared.playback.read(route.source,f,&found);
-                    dest[n*route.dest.stride]=value;if(!found){shared.playbackMisses.fetch_add(1,std::memory_order_relaxed);++missing;}
+                    dest[n*route.dest.stride]=value;if(!found){
+                        shared.playbackMisses.fetch_add(1,std::memory_order_relaxed);
+                        if(!missing && shared.timingEnabled) {
+                            // Best-effort tag after the failed read: a future
+                            // tag indicates reuse, an older tag absent data.
+                            const auto tag=f>=0 && route.source<patch::MaxChannels?
+                                shared.playback.tags[route.source][uint64_t(f)%patch::SharedFrames].load():-1;
+                            d.lastMissingPlayback.record(f,f+1,entryHost,route.source,tag);
+                        }
+                        ++missing;
+                    }
                 }
             }
             d.playbackSamples.fetch_add(checked,std::memory_order_relaxed);

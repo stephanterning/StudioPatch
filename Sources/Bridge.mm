@@ -454,12 +454,19 @@ extern "C" char* SPStatus() { @autoreleasepool {
             uint64_t entry=0,host=0;double sample=0;bool valid=c.snapshot(entry,host,sample);
             return @{@"valid":@(valid),@"entryHost":@(entry),@"cycleHost":@(host),@"sample":@(sample)};
         };
+        auto playbackEvent=[](const DirectEngine::PlaybackEvent& event,bool missing=false)->NSDictionary* {
+            const auto value=event.snapshot();
+            if(!value.valid)return @{@"valid":@NO};
+            if(missing)return @{@"valid":@YES,@"host":@(value.host),@"frame":@(value.first),
+                @"channel":@(value.channel+1),@"tagAfterRead":@(value.tag)};
+            return @{@"valid":@YES,@"host":@(value.host),@"first":@(value.first),@"end":@(value.end)};
+        };
         NSMutableArray* deviceTiming=[NSMutableArray array];uint32_t masterIn=0,masterOut=0;
         for(auto& d:engine->devices)if(d->master){masterIn=d->physicalInputLatency;masterOut=d->physicalOutputLatency;}
         auto snapshotHost=mach_absolute_time();
         for(auto& d:engine->devices) {
             const auto last=d->lastCallbackHost.load();
-            [deviceTiming addObject:@{@"deviceID":@(d->physical),@"uid":@(d->uid.c_str()),@"master":@(d->master),
+            NSMutableDictionary* details=[@{@"deviceID":@(d->physical),@"uid":@(d->uid.c_str()),@"master":@(d->master),
             @"callbackCount":@(d->callbacks.load()),@"lastCallbackHost":@(last),
             @"callbackClock":observation(d->callbackClock),
             @"blockFrames":@(d->lastBlockFrames.load()),
@@ -474,9 +481,11 @@ extern "C" char* SPStatus() { @autoreleasepool {
             @"mappingOffsetFrames":@(d->mappingOffset.load()),@"lastSampleStepFrames":@(d->lastSampleStep.load()),@"rawSample":@(d->rawSample.load()),
             @"clockSkewFrames":@(d->clockSkew.load()),@"peakClockSkewFrames":@(d->peakClockSkew.load()),
             @"inputSkewFrames":@(int64_t(d->physicalInputLatency)+d->extraInput+engine->additionalPadding(*d,true)-masterIn),
-            @"outputSkewFrames":@(int64_t(d->physicalOutputLatency)+d->extraOutput+engine->additionalPadding(*d,false)-masterOut)}];
+            @"outputSkewFrames":@(int64_t(d->physicalOutputLatency)+d->extraOutput+engine->additionalPadding(*d,false)-masterOut)} mutableCopy];
+            if(state.timingEnabled)details[@"lastMissingPlayback"]=playbackEvent(d->lastMissingPlayback,true);
+            [deviceTiming addObject:details];
         }
-        auto values=@{@"diagnosticSchemaVersion":@1,@"timelineCounterVersion":@2,@"snapshotHost":@(snapshotHost),@"ticksPerFrame":@(engine->nominalTicks),@"clockEpoch":@(state.clockEpoch.load()),@"devices":deviceTiming,@"transport":@"direct shared memory",@"timingEnabled":@(state.timingEnabled),@"routingUpdates":@(engine->routingUpdates.load()),@"generation":@(engine->generation),@"rate":@(state.rate),@"readPhase":phase(state.readPhase),@"writePhase":phase(state.writePhase),
+        NSMutableDictionary* values=[@{@"diagnosticSchemaVersion":@1,@"timelineCounterVersion":@2,@"snapshotHost":@(snapshotHost),@"ticksPerFrame":@(engine->nominalTicks),@"clockEpoch":@(state.clockEpoch.load()),@"devices":deviceTiming,@"transport":@"direct shared memory",@"timingEnabled":@(state.timingEnabled),@"routingUpdates":@(engine->routingUpdates.load()),@"generation":@(engine->generation),@"rate":@(state.rate),@"readPhase":phase(state.readPhase),@"writePhase":phase(state.writePhase),
             @"captureMarginHistogram":histogram(state.captureMargin),@"playbackMarginHistogram":histogram(state.playbackMargin),
             @"captureMarginReads":@(state.captureMargin.reads.load()),@"playbackMarginReads":@(state.playbackMargin.reads.load()),
             @"captureMarginMinTicks":@(state.captureMargin.minimumTicks.load()),@"playbackMarginMinTicks":@(state.playbackMargin.minimumTicks.load()),
@@ -484,7 +493,14 @@ extern "C" char* SPStatus() { @autoreleasepool {
             @"serviceCycle":observation(state.serviceCycle),@"readCycle":observation(state.readCycle),@"writeCycle":observation(state.writeCycle),@"bufferFrames":@(engine->actualBuffer.load()),
             @"inputPadding":@(state.inputPadding.load()),@"outputPadding":@(state.padding.load()),@"captureMisses":@(state.captureMisses.load()),
             @"playbackMisses":@(state.playbackMisses.load()),@"reportedLatency":stringProperty(pluginID(),patch::LatencyProperty),
-            @"inputSafety":@(engine->masterInputSafety),@"outputSafety":@(engine->masterOutputSafety)};
+            @"inputSafety":@(engine->masterInputSafety),@"outputSafety":@(engine->masterOutputSafety)} mutableCopy];
+        if(state.timingEnabled) {
+            const auto& p=engine->playbackPublications;
+            values[@"playbackPublications"]=@{@"mode":@"consecutive publication ranges; jumps do not establish missing coverage",@"observed":@(p.observed.load()),@"lostRecords":@(p.lostRecords.load()),
+                @"unavailableRecords":@(p.unavailableRecords.load()),@"forwardJumps":@(p.gaps.load()),@"forwardJumpFrames":@(p.gapFrames.load()),
+                @"backwardJumps":@(p.overlaps.load()),@"backwardJumpFrames":@(p.overlapFrames.load()),
+                @"lastForwardJump":playbackEvent(p.lastGap),@"lastBackwardJump":playbackEvent(p.lastOverlap)};
+        }
         diagnostics=[[NSString alloc] initWithData:[NSJSONSerialization dataWithJSONObject:values options:0 error:nil] encoding:NSUTF8StringEncoding];
     }catch(const std::exception& e){diagnostics=[@"unavailable: " stringByAppendingString:@(e.what())];}
     NSMutableArray* warnings=[NSMutableArray array];

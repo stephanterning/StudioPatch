@@ -68,6 +68,29 @@ int main() {
     auto expected=double(now.mHostTime)+(patch::RingFrames-now.mSampleTime)*250.025;
     assert(scaled.get(shared,uint64_t(expected+251),ss,sh,se));
     assert(ss==patch::RingFrames && std::abs(double(sh)-expected)<1);
+    // A refreshed hardware clock can revise its projection by a fraction of
+    // a frame near a period boundary. HAL must not see the preceding period
+    // again under the same seed when host queries continue moving forward.
+    {
+        patch::HardwareTimeline boundary;
+        constexpr uint64_t anchor=1000000000,period=patch::RingFrames;
+        shared.publishClock({double(period-128),250,anchor,0});
+        assert(boundary.get(shared,anchor+128*250+10,ss,sh,se));
+        assert(ss==period && se==0);const auto boundaryHost=sh;
+        shared.publishClock({double(period-1),250,anchor+128*250+20,0});
+        assert(boundary.get(shared,anchor+128*250+20,ss,sh,se));
+        assert(ss==period && sh==boundaryHost && se==0);
+        shared.publishClock({double(period+127),250,anchor+256*250,0});
+        assert(boundary.get(shared,anchor+256*250,ss,sh,se));
+        assert(ss==period && sh==boundaryHost && se==0);
+        const auto laterHost=anchor+(period+128)*250;
+        shared.publishClock({double(2*period),250,laterHost,0});
+        assert(boundary.get(shared,laterHost,ss,sh,se));
+        assert(ss==2*period && sh>boundaryHost && se==0);
+        shared.publishClock({64,250,laterHost+250,1});
+        assert(boundary.get(shared,laterHost+250,ss,sh,se));
+        assert(ss==0 && se==1); // A new epoch permits a new sample origin.
+    }
     now.mRateScalar=1;DirectEngine::io(0,&now,&input,&it,&output,&ot,&d);
     patch::PhaseMeter phase;
     phase.record(false,32,90,1);phase.record(true,32,100,1);
@@ -83,6 +106,49 @@ int main() {
     log.publish(0,32,100);log.publish(64,96,200);
     stats.observe(log,0,96,300,1);assert(stats.unmatched==1); // Interior hole.
     log.publish(32,64,250);stats.observe(log,0,96,300,1);assert(stats.minimumTicks==50);
+    {
+        patch::PublicationLog publications;DirectEngine::PlaybackPublicationTimeline observed;
+        int64_t first=1000;uint64_t host=10;
+        for(auto frames:{128,512,128,512}) {publications.publish(first,first+frames,host);first+=frames;host+=10;}
+        observed.observe(publications);
+        assert(observed.observed==4 && observed.gaps==0 && observed.overlaps==0);
+        publications.publish(first+384,first+384+128,host);observed.observe(publications);
+        assert(observed.gaps==1 && observed.gapFrames==384 && observed.lastGap.snapshot().valid && observed.lastGap.snapshot().first==first && observed.lastGap.snapshot().end==first+384 && observed.lastGap.snapshot().host==host);
+        first+=384+128;host+=10;
+        publications.publish(first-256,first+256,host);observed.observe(publications);
+        assert(observed.overlaps==1 && observed.overlapFrames==256 && observed.lastOverlap.snapshot().valid && observed.lastOverlap.snapshot().first==first-256 && observed.lastOverlap.snapshot().end==first && observed.lastOverlap.snapshot().host==host);
+        first+=256;host+=10;publications.publish(first,first+128,host);observed.observe(publications);
+        assert(observed.observed==7 && observed.gaps==1 && observed.overlaps==1);
+        first+=128;host+=10;
+        const auto torn=publications.count.load();publications.publish(first,first+128,host);
+        publications.slots[torn%publications.slots.size()].sequence=2*torn+1;
+        observed.observe(publications);assert(observed.unavailableRecords==1);
+        first+=128;host+=10;publications.publish(first,first+512,host);observed.observe(publications);
+        assert(observed.gaps==1); // Do not infer a gap across an unreadable record.
+        const auto before=observed.observed.load();
+        first=1000000;
+        for(int n=0;n<300;++n){host+=10;publications.publish(first,first+128,host);first+=128;}
+        observed.observe(publications);
+        assert(observed.lostRecords==44 && observed.observed==before+256);
+        assert(observed.gaps==1 && observed.overlaps==1); // Lost history breaks the baseline.
+        observed.observe(publications);assert(observed.observed==before+256); // No duplicate counting.
+    }
+    {
+        patch::PublicationLog publications;DirectEngine::PlaybackPublicationTimeline observed;
+        assert(!observed.lastGap.snapshot().valid);
+        publications.publish(0,512,10);publications.publish(128,256,20);publications.publish(512,640,30);
+        observed.observe(publications);
+        assert(observed.gaps==1 && observed.gapFrames==256 && observed.overlaps==1 && observed.overlapFrames==384);
+        const auto overlap=observed.lastOverlap.snapshot();
+        assert(overlap.valid && overlap.first==128 && overlap.end==512 && overlap.host==20);
+        // A contained overlap produces a backward then forward adjacent step,
+        // even though coverage has no hole. Exported counters say "jumps".
+        // A control snapshot never combines fields across an event.
+        observed.lastGap.sequence.fetch_add(1);observed.lastGap.first=9999;
+        assert(!observed.lastGap.snapshot().valid);
+        observed.lastGap.first=256;observed.lastGap.sequence.fetch_add(1);
+        const auto gap=observed.lastGap.snapshot();assert(gap.valid && gap.first==256 && gap.end==512 && gap.host==30);
+    }
     assert(shared.claimed.exchange(1)==0 && shared.claimed.exchange(1)==1);
     // Old slots never reappear when wrapping, and inactive transport is silent.
     shared.playback.write(1,10268+patch::SharedFrames,1);assert(shared.playback.read(1,10268)==0);
@@ -229,13 +295,18 @@ int main() {
     auto dn=now,di=it,dout=ot;dn.mSampleTime=100000;di.mSampleTime=99800;dout.mSampleTime=100100;
     auto played=int64_t(dout.mSampleTime-shared.padding);
     shared.playback.write(1,played,.375f);
+    shared.timingEnabled=true;
     DirectEngine::io(0,&dn,&input,&di,&output,&dout,&observed);
     assert(out[0]==.375f && out[2]==0 && shared.capture.read(2,99800)==2);
     assert(observed.partialPlaybackBlocks==1 && observed.playbackMissingSamples==1 && observed.playbackSamples==2);
+    assert(observed.lastMissingPlayback.snapshot().valid && observed.lastMissingPlayback.snapshot().first==played+1 && observed.lastMissingPlayback.snapshot().channel==1);
+    assert(observed.lastMissingPlayback.snapshot().tag==shared.playback.tags[1][uint64_t(played+1)%patch::SharedFrames].load());
+    const auto missingHost=observed.lastMissingPlayback.snapshot().host;shared.timingEnabled=false;
     // An all-missing block is retained as raw evidence, not called incomplete.
     dout.mSampleTime+=2;dn.mSampleTime+=2;
     DirectEngine::io(0,&dn,&input,&di,&output,&dout,&observed);
     assert(observed.partialPlaybackBlocks==1 && observed.playbackMissingSamples==3);
+    assert(observed.lastMissingPlayback.snapshot().host==missingHost); // Optional observation has no effect when disabled.
     dn.mFlags=0;DirectEngine::io(0,&dn,&input,&di,&output,&dout,&observed);
     assert(observed.invalidTimestamps==1 && shared.active);
     dn.mFlags=now.mFlags;dn.mSampleTime+=2;

@@ -156,8 +156,15 @@ final class AudioDiagnosticRecorder {
         do {
             let summary=snapshot.diagnostics.map { try? JSONSerialization.jsonObject(with:JSONEncoder().encode($0)) } ?? nil
             let engine=snapshot.latencyDiagnostics.flatMap { try? JSONSerialization.jsonObject(with:Data($0.utf8)) } as? [String:Any] ?? [:]
-            let transport=engine.filter { ["rate","bufferFrames","inputPadding","outputPadding","inputSafety","outputSafety",
-                "captureMisses","playbackMisses","routingUpdates","clockEpoch","snapshotHost","ticksPerFrame","reportedLatency","timingEnabled"].contains($0.key) }
+            var transport=engine.filter { ["rate","bufferFrames","inputPadding","outputPadding","inputSafety","outputSafety",
+                "captureMisses","playbackMisses","routingUpdates","clockEpoch","snapshotHost","ticksPerFrame","reportedLatency","timingEnabled","playbackPublications"].contains($0.key) }
+            // Timing-only evidence stays bounded to the last failed read per
+            // interface and survives later status updates in logs and exports.
+            let playbackReadFailures=(engine["devices"] as? [[String:Any]] ?? []).compactMap { member -> [String:Any]? in
+                guard let uid=member["uid"] as? String,let failure=member["lastMissingPlayback"] as? [String:Any] else { return nil }
+                return ["uid":uid,"lastMissingPlayback":failure]
+            }
+            if !playbackReadFailures.isEmpty { transport["playbackReadFailures"]=playbackReadFailures }
             let record:[String:Any]=["schemaVersion":1,"kind":"observation","serviceID":serviceID,
                 "timestamp":Self.timestamp(snapshot.date),"uptimeSeconds":uptime,"intervalSeconds":interval,
                 "running":snapshot.running,"health":snapshot.health.rawValue,"message":snapshot.message,
