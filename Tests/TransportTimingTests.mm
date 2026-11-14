@@ -6,7 +6,7 @@
 
 // Run the real HAL handler and hardware callback on independent schedules.
 // Producers publish only when their callback executes, never future fixtures.
-static void transfer(uint32_t rate,uint32_t hardwareFrames,uint32_t clientFrames,uint32_t phase,uint32_t secondaryFrames=0,bool clientFirst=false,uint32_t secondaryDelay=0) {
+static void transfer(uint32_t rate,uint32_t hardwareFrames,uint32_t clientFrames,uint32_t phase,uint32_t secondaryFrames=0,bool clientFirst=false,uint32_t secondaryDelay=0,uint32_t masterDelay=0,uint32_t clientDelay=0) {
     auto mapping=std::make_shared<patch::SharedMapping>();mapping->size=sizeof(patch::SharedTransport);
     mapping->data=new(mmap(nullptr,mapping->size,PROT_READ|PROT_WRITE,MAP_ANON|MAP_SHARED,-1,0)) patch::SharedTransport;
     auto& shared=*mapping->data;shared.rate=rate;shared.inputs=2;shared.outputs=2;shared.active=1;
@@ -30,15 +30,17 @@ static void transfer(uint32_t rate,uint32_t hardwareFrames,uint32_t clientFrames
     int64_t hardware=0,other=13,client=phase;
     while(std::min({hardware,other,client})<duration) {
         // Exercise both thread orders when callback deadlines coincide.
-        auto nextHardware=std::min(hardware,other+secondaryDelay);
-        if(nextHardware<client || (nextHardware==client && !clientFirst)) {
-            bool master=hardware<=other+secondaryDelay;auto& d=master?device:secondary;
+        // Data becomes visible at callback completion, which can be later
+        // than its scheduled cycle. Sample ranges still name that cycle.
+        auto nextHardware=std::min(hardware+masterDelay,other+secondaryDelay);
+        if(nextHardware<client+clientDelay || (nextHardware==client+clientDelay && !clientFirst)) {
+            bool master=hardware+masterDelay<=other+secondaryDelay;auto& d=master?device:secondary;
             auto& scheduled=master?hardware:other;auto frames=master?hardwareFrames:secondaryFrames;
             uint32_t channel=master?0:1;
             int64_t time=origin+scheduled;
             AudioTimeStamp now{},it{},ot{};
             now.mFlags=it.mFlags=ot.mFlags=kAudioTimeStampSampleHostTimeValid;
-            now.mSampleTime=time+(master?0:secondaryDelay)-d.offset;
+            now.mSampleTime=time+(master?masterDelay:secondaryDelay)-d.offset;
             it.mSampleTime=time-d.offset-frames-safety-d.extraInput;ot.mSampleTime=time-d.offset+frames+safety+d.extraOutput;
             now.mHostTime=(now.mSampleTime+d.offset)*engine.nominalTicks;it.mHostTime=(it.mSampleTime+d.offset)*engine.nominalTicks;ot.mHostTime=(ot.mSampleTime+d.offset)*engine.nominalTicks;
             for(uint32_t n=0;n<frames;++n)input[n]=value(int64_t(it.mSampleTime+d.offset)+n,channel);
@@ -62,6 +64,7 @@ static void transfer(uint32_t rate,uint32_t hardwareFrames,uint32_t clientFrames
         }
     }
     if(playbackErrors || captureErrors)std::cerr<<"rate="<<rate<<" hardware="<<hardwareFrames<<" secondary="<<secondaryFrames<<" client="<<clientFrames<<" phase="<<phase
+        <<" masterDelay="<<masterDelay<<" secondaryDelay="<<secondaryDelay<<" clientDelay="<<clientDelay<<" clientFirst="<<clientFirst
         <<" missing/corrupt playback="<<playbackErrors<<"/"<<checked<<" capture="<<captureErrors<<"\n";
     assert(playbackErrors==0 && captureErrors==0);
 }
@@ -70,6 +73,21 @@ int main() { @autoreleasepool {
         // inNow includes wake-up latency, while input timestamps still name
         // the same contiguous hardware blocks. A client can run in that gap.
         transfer(rate,1024,32,7,1024,true,1023);
+        // A 32-frame master also needs room for completion, even when every
+        // client block is at least 32 frames. Immediate-publication fixtures
+        // alone would incorrectly permit one-block capture/playback margins.
+        for(uint32_t client:{32,128,512}) {
+            transfer(rate,32,client,7,32,true,31,31,0);
+            transfer(rate,32,client,7,32,false,0,0,client-1);
+        }
+        // A larger secondary's own margin cannot protect a late short master
+        // or a client completing near its deadline. Cover each independently.
+        transfer(rate,32,128,7,1024,true,1023,31,0);
+        transfer(rate,32,128,7,1024,false,1023,0,127);
+        transfer(rate,1024,32,7,1024,true,1023,1023,0);
+        // At an exact deadline, also exercise hardware reading before the
+        // client publishes; the shorter cases above finish within the budget.
+        transfer(rate,1024,1024,0,1024,false,0,0,1024);
         for(uint32_t hardware:{32,64,128,256,512,1024})
             for(uint32_t client:{32,64,128,256,512,1024})
                 for(uint32_t phase:{0u,7u,client-1})transfer(rate,hardware,client,phase,hardware,false,
@@ -80,5 +98,5 @@ int main() { @autoreleasepool {
                 transfer(rate,1024,client,client-1,secondary,true);
             }
     }
-    std::cout<<"PASS: independent capture/playback schedules, 32–1024 frame interfaces, differing secondary buffers/safety offsets, 1–1024 frame clients, ring wrap, 48/96/192 kHz\n";
+    std::cout<<"PASS: independent capture/playback schedules and completion budgets, 32–1024 frame interfaces, differing secondary buffers/safety offsets, 1–1024 frame clients, ring wrap, 48/96/192 kHz\n";
 } }

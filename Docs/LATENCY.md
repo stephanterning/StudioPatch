@@ -22,6 +22,8 @@ A larger engine I/O buffer increases both margins (64 samples → 128 + 128 fram
 
 Playback needs two blocks because the hardware requests a block ahead of the current cycle, and the end of that block may not yet have been produced by a smaller, independently scheduled client. Capture needs a full block for relative callback phase plus another block for the producer to finish publishing: a late or still-running physical callback can otherwise leave the requested input tail unwritten, even with perfectly contiguous sample timestamps. Smaller playback margins require their own qualification; increasing the buffer alone did not fix this scheduling error.
 
+The November 15 audit tested reducing only the 32-frame case to one block per direction. Real driver/engine simulations reproduced missing samples when publication completed later within its existing callback budget, including clients of 32, 128 and 512 frames. Immediate-publication cases passed, but that does not establish a safe condition for enabling the lower margin. The two-block policy is retained; historical timing measurements or client buffer sizes alone cannot guarantee the next callback's completion time. See [the audit](history/LATENCY-AUDIT-2026-11-15.md).
+
 ## Earlier measured results (one-block playback margin)
 
 These measurements predate the November 12 buffer fix and must not be treated as measurements of its two-block playback margin. They used a physical cable from analog output 3 to analog input 3 on an RME UFX III (Sync Source), with an Allen & Heath ZED-R16 also selected as a clock-locked secondary interface. Engine I/O buffer 32, measurement client buffer 256.
@@ -49,6 +51,8 @@ latency = Sync Source device latency + largest Sync Source stream latency + Stud
 ```
 
 Safety offsets equal the Sync Source's. The DAW adds its own buffer on top, as with any interface.
+
+At engine initialization, safety offsets are read after all interfaces' buffer settings have been applied. The Sync Source receives no additional safety-difference delay; secondary differences use that post-configuration reference. This fixes a reproduced defect where a Sync Source whose safety offset increased at the buffer write gained an extra, unreported delay. Later changes to secondary safety-difference offsets still take effect at the next engine rebuild.
 
 Reporting always refers to the **Sync Source**. A route from a secondary interface can have a different real latency; the panel's **Advanced** section shows each secondary interface's calculated difference. These are estimates from reported values, not measurements of the analog path.
 

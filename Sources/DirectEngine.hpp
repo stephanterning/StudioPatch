@@ -388,6 +388,26 @@ public:
             for(int attempt=0;attempt<100 && !timingApplied();++attempt)std::this_thread::sleep_for(std::chrono::milliseconds(20));
         } catch(const std::exception& error) { deviceWarnings.push_back(std::string("Latency was not reported: ")+error.what()); }
     }
+    void initializeSafetyOffsets() {
+        // Buffer writes can change safety offsets, including on another member
+        // of an aggregate. Read after all devices are configured, then compare
+        // against the accepted Sync Source values independent of preset order.
+        for(auto& d:devices) {
+            bool unknown=false;
+            auto read=[&](AudioObjectPropertyScope scope,uint32_t fallback) {
+                try { return get<UInt32>(d->id,kAudioDevicePropertySafetyOffset,scope); }
+                catch(const std::exception&) { unknown=true;return fallback; }
+            };
+            d->inputSafety=read(kAudioObjectPropertyScopeInput,d->master?masterInputSafety:d->inputSafety);
+            d->outputSafety=read(kAudioObjectPropertyScopeOutput,d->master?masterOutputSafety:d->outputSafety);
+            if(d->master){masterInputSafety=d->inputSafety;masterOutputSafety=d->outputSafety;}
+            if(unknown)deviceWarnings.push_back(deviceName(@(d->uid.c_str()))+": safety offset could not be read; timing may be incomplete.");
+        }
+        for(auto& d:devices) {
+            d->extraInput=!d->master && d->inputSafety>masterInputSafety?d->inputSafety-masterInputSafety:0;
+            d->extraOutput=!d->master && d->outputSafety>masterOutputSafety?d->outputSafety-masterOutputSafety:0;
+        }
+    }
     std::unique_ptr<DeviceIO> openDevice(NSDictionary* member,NSString* master,uint32_t buffer) {
         NSString* uid=member[@"uid"];
         if(![uid isKindOfClass:NSString.class] || [uid hasPrefix:@"se.studiopatch."])throw std::runtime_error("Invalid physical interface");
@@ -445,13 +465,9 @@ public:
         if(!float32)throw std::runtime_error("Direct path requires Float32 audio");
         bool timingUnknown=false;
         auto timing=[&](auto read)->uint32_t { try { return read(); } catch(const std::exception&) { timingUnknown=true; return 0; } };
-        d->inputSafety=timing([&]{return get<UInt32>(d->id,kAudioDevicePropertySafetyOffset,kAudioObjectPropertyScopeInput);});
-        d->outputSafety=timing([&]{return get<UInt32>(d->id,kAudioDevicePropertySafetyOffset,kAudioObjectPropertyScopeOutput);});
-        d->extraInput=d->inputSafety>masterInputSafety?d->inputSafety-masterInputSafety:0;
-        d->extraOutput=d->outputSafety>masterOutputSafety?d->outputSafety-masterOutputSafety:0;
         d->physicalInputLatency=timing([&]{return pathLatency(d->physical,true);});
         d->physicalOutputLatency=timing([&]{return pathLatency(d->physical,false);});
-        if(timingUnknown)deviceWarnings.push_back(deviceName(uid)+": latency or safety offset could not be read; timing may be incomplete.");
+        if(timingUnknown)deviceWarnings.push_back(deviceName(uid)+": latency could not be read; timing may be incomplete.");
         return d;
     }
     void start(NSDictionary* request) {
@@ -483,6 +499,7 @@ public:
             }
         }
         if(!actualBuffer)throw std::runtime_error("Sync Source must be selected");
+        initializeSafetyOffsets();
         // Two hardware blocks in each direction; the callback corrects
         // an unavailable startup buffer query before copying its first samples.
         if(auto raw=std::getenv("STUDIOPATCH_TEST_OUTPUT_PADDING")) {

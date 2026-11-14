@@ -14,6 +14,9 @@ static OSStatus faultSet(AudioObjectID,const AudioObjectPropertyAddress*,UInt32,
 #include <sys/mman.h>
 static bool ioRunning=false,failLatency=false,failSecondary=false,failMasterRate=false,failBufferRead=false;
 static UInt32 actualBuffer=32;
+static bool safetyChangesWithBuffer=false,failPostBufferInputSafety=false;
+static UInt32 acceptedBuffers[2]={32,32};
+static std::string reportedTiming;
 static int pluginLookups=0,rateWrites=0;
 static bool failAfterRateWrite=false;
 static double masterRate=96000;
@@ -49,8 +52,12 @@ static OSStatus faultRead(AudioObjectID id,const AudioObjectPropertyAddress* a,U
     case kAudioObjectPropertyName:*static_cast<CFStringRef*>(out)=CFStringCreateCopy(nullptr,CFSTR("Fault interface"));return noErr;
     case kAudioDevicePropertyDeviceIsAlive:*static_cast<UInt32*>(out)=1;return noErr;
     case kAudioDevicePropertyTransportType:*static_cast<UInt32*>(out)=kAudioDeviceTransportTypeUSB;return noErr;
-    case kAudioDevicePropertyBufferFrameSize:if(failBufferRead)return kAudioHardwareBadObjectError;*static_cast<UInt32*>(out)=actualBuffer;return noErr;
-    case kAudioDevicePropertySafetyOffset:*static_cast<UInt32*>(out)=0;return noErr;
+    case kAudioDevicePropertyBufferFrameSize:if(failBufferRead)return kAudioHardwareBadObjectError;*static_cast<UInt32*>(out)=safetyChangesWithBuffer?acceptedBuffers[id==10?0:1]:actualBuffer;return noErr;
+    case kAudioDevicePropertySafetyOffset:
+        if(!safetyChangesWithBuffer){*static_cast<UInt32*>(out)=0;return noErr;}
+        if(id==10 && acceptedBuffers[0]!=32 && a->mScope==kAudioObjectPropertyScopeInput && failPostBufferInputSafety)return kAudioHardwareUnknownPropertyError;
+        *static_cast<UInt32*>(out)=id==10?(acceptedBuffers[0]==32?48:(a->mScope==kAudioObjectPropertyScopeInput?128:96)):
+            (a->mScope==kAudioObjectPropertyScopeInput?160:112);return noErr;
     case kAudioDevicePropertyNominalSampleRate:if(failMasterRate && id==10)return kAudioHardwareBadObjectError;*static_cast<Float64*>(out)=id==10?masterRate:96000;return noErr;
     case kAudioDevicePropertyAvailableNominalSampleRates:*static_cast<AudioValueRange*>(out)={48000,96000};return noErr;
     case kAudioDevicePropertyStreamConfiguration:*static_cast<AudioBufferList*>(out)={1,{{2,0,nullptr}}};return noErr;
@@ -62,6 +69,8 @@ static OSStatus faultRead(AudioObjectID id,const AudioObjectPropertyAddress* a,U
     }
 }
 static OSStatus faultSet(AudioObjectID id,const AudioObjectPropertyAddress* a,UInt32,const void*,UInt32,const void* value) {
+    if(a->mSelector==kAudioDevicePropertyBufferFrameSize && safetyChangesWithBuffer)acceptedBuffers[id==10?0:1]=*static_cast<const UInt32*>(value);
+    if(a->mSelector==patch::LatencyProperty){NSString* text=(__bridge NSString*)*static_cast<const CFStringRef*>(value);reportedTiming=text.UTF8String;}
     if(a->mSelector==kAudioDevicePropertyNominalSampleRate){++rateWrites;if(id==10 && failAfterRateWrite){masterRate=*static_cast<const double*>(value);failMasterRate=true;}}
     if(a->mSelector==patch::ConfigProperty){if(failConfigurationWrite)return kAudioHardwareBadObjectError;++configurationWrites;configurationReady=false;NSString* text=(__bridge NSString*)*static_cast<const CFStringRef*>(value);requestedConfig=text.UTF8String;}
     return noErr;
@@ -110,6 +119,42 @@ int main() { @autoreleasepool {
         e.reportTiming();
         assert(e.deviceWarnings.size()==1 && e.deviceWarnings[0].find("Latency was not reported")==0);
         assert(allowed==0 || !e.lastReport.empty()); // the publication itself succeeded
+    }
+
+    // Buffer acceptance can change safety offsets. The Sync Source must not
+    // acquire an unreported extra delay, regardless of preset member order.
+    for(bool secondaryFirst:{false,true})for(bool unreadableInput:{false,true}) {
+        safetyChangesWithBuffer=true;acceptedBuffers[0]=acceptedBuffers[1]=32;
+        DirectEngine safety;safety.memory=mapping;safety.syncSource=10;safety.generation=1;safety.nominalTicks=250;
+        safety.masterInputSafety=get<UInt32>(10,kAudioDevicePropertySafetyOffset,kAudioObjectPropertyScopeInput);
+        safety.masterOutputSafety=get<UInt32>(10,kAudioDevicePropertySafetyOffset,kAudioObjectPropertyScopeOutput);
+        failPostBufferInputSafety=unreadableInput;
+        NSArray* members=secondaryFirst?@[request[@"devices"][1],master]:@[master,request[@"devices"][1]];
+        for(NSDictionary* member in members)safety.devices.push_back(safety.openDevice(member,@"master",128));
+        safety.initializeSafetyOffsets();
+        auto& source=*safety.devices[secondaryFirst?1:0];auto& other=*safety.devices[secondaryFirst?0:1];
+        auto& shared=*mapping->data;shared.rate=96000;shared.inputs=1;shared.outputs=1;shared.active=1;shared.padding=0;shared.inputPadding=0;
+        safety.observeBlock(128);
+        source.outputs={{0,{0,0,2}}};source.inputs={{{0,0,2},0}};
+        constexpr int64_t capture=50000,playback=52000;
+        const int64_t expectedRead=playback-shared.padding;
+        for(int64_t n=-256;n<256;++n)shared.playback.write(0,expectedRead+n,float(n+300));
+        float input[256]{},output[256]{};for(int n=0;n<128;++n)input[2*n]=float(n+1);
+        AudioTimeStamp now{},it{},ot{};now.mFlags=it.mFlags=ot.mFlags=kAudioTimeStampSampleHostTimeValid;
+        now.mSampleTime=51000;it.mSampleTime=capture;ot.mSampleTime=playback;
+        now.mHostTime=51000*250;it.mHostTime=capture*250;ot.mHostTime=playback*250;
+        AudioBufferList in{1,{{2,sizeof(input),input}}},out{1,{{2,sizeof(output),output}}};
+        DirectEngine::io(0,&now,&in,&it,&out,&ot,&source);
+        for(int n=0;n<128;++n)assert(output[2*n]==float(n+300) && shared.capture.read(0,capture+n)==float(n+1));
+        assert(source.extraInput==0 && source.extraOutput==0);
+        assert(safety.masterInputSafety==(unreadableInput?48:128) && safety.masterOutputSafety==96);
+        assert(other.extraInput==(unreadableInput?112:32) && other.extraOutput==16);
+        if(unreadableInput)assert(!safety.deviceWarnings.empty());
+        else {
+            pluginLookups=1;safety.publishLatency();
+            assert(reportedTiming=="1 "+std::to_string(shared.inputPadding.load())+" "+std::to_string(shared.padding.load())+" 128 96");
+        }
+        failPostBufferInputSafety=false;safetyChangesWithBuffer=false;
     }
 
     // Status suppresses rate warnings only for an aggregate whose I/O started.
