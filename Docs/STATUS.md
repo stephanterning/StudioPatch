@@ -1,5 +1,11 @@
 # Project status
 
+## Coordinated delivery feasibility — 2026-11-15
+
+A separate executable event model demonstrates that a shared cycle grid and completion-before-consumer ordering can support 32 + 32 frames / 0.667 ms added RTL at 96 kHz, including simultaneous 32/128/512-frame clients and aligned joins. The same low-margin design fails with one-frame phase displacement in near-budget cases, independently phased joins, or a 47-frame client that leaves the hardware grid after startup. Conservative 64 + 64 frame controls pass the corresponding cases. A 40 + 40 frame / 0.833 ms target also passes conditionally, but requires bounded phase error and reserved producer/mixer completion headroom.
+
+Local SDK review and read-only device queries did not establish a generic public mechanism for enforcing those conditions across arbitrary applications and the separate physical HAL callback. Workgroups, clock mapping and initial start alignment are useful controls but do not provide the missing publication ordering. Hardware-backend integration or a wholly owned render graph could remove the boundary; they change the architecture or product scope. No production code, running audio or latency settings were changed. The model is not a live HAL implementation or a physical RTL measurement. See [the investigation](history/COORDINATED-DELIVERY-2026-11-15.md) for reproducible local evidence, alternatives and qualification requirements.
+
 ## Short-buffer latency and safety offsets — 2026-11-15
 
 The safety-offset defect is reproduced and fixed locally. A Sync Source whose safety increases during its buffer write previously gained an extra tag/read shift that was omitted from the latency report. A deterministic HAL fixture reproduced 80 extra capture frames and 48 extra playback frames with a 48/48 → 128/96 safety change; actual callback sample checks fail before the fix and pass afterward. Safety is now read after all members' buffer writes, the master always has zero extra safety-difference delay, and secondaries use the post-configuration reference regardless of preset order. Failed master reads retain the known pre-write value with a warning. Later changes to secondary safety differences still await a rebuild.

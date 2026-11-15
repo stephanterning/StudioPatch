@@ -24,6 +24,8 @@ Playback needs two blocks because the hardware requests a block ahead of the cur
 
 The November 15 audit tested reducing only the 32-frame case to one block per direction. Real driver/engine simulations reproduced missing samples when publication completed later within its existing callback budget, including clients of 32, 128 and 512 frames. Immediate-publication cases passed, but that does not establish a safe condition for enabling the lower margin. The two-block policy is retained; historical timing measurements or client buffer sizes alone cannot guarantee the next callback's completion time. See [the audit](history/LATENCY-AUDIT-2026-11-15.md).
 
+A subsequent [coordination investigation](history/COORDINATED-DELIVERY-2026-11-15.md) demonstrates a theoretical 32 + 32 frame pipeline with a shared cycle grid and ordered completion, including multiple clients. The reviewed public HAL APIs do not establish that ordering for StudioPatch's separate physical/virtual loops. Neither exact alignment nor a smaller guarded margin is currently qualified for production; the policy above remains unchanged.
+
 ## Earlier measured results (one-block playback margin)
 
 These measurements predate the November 12 buffer fix and must not be treated as measurements of its two-block playback margin. They used a physical cable from analog output 3 to analog input 3 on an RME UFX III (Sync Source), with an Allen & Heath ZED-R16 also selected as a clock-locked secondary interface. Engine I/O buffer 32, measurement client buffer 256.
